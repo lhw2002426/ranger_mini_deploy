@@ -1,0 +1,37 @@
+<!--
+  Static TF tree for Ranger Mini until soma (URDF + robot_state_publisher)
+  ships in robonix v0.2.
+
+  REPLACE the x y z and roll pitch yaw values below with measurements
+  from your physical robot before relying on this for SLAM / nav.
+  Mis-calibrated TF is one of the most common causes of "rtabmap thinks
+  the robot is jumping around" / "navigation goal is 30cm off".
+
+  Frame conventions (see README.md "URDF — required, not shipped"):
+    base_link   — chassis frame; ground projection of geometric centre,
+                  X forward, Y left, Z up.
+    livox_frame — MID-360 lidar mount frame (the lidar driver publishes
+                  PointCloud2 in this frame).
+    camera_link — RealSense D435i mount frame.
+    camera_color_optical_frame — published by realsense2_camera itself,
+                  do NOT add a static TF for it here.
+
+  Run:
+    ros2 launch side_launch/static_tf.launch.xml
+-->
+<launch>
+  <!-- Lidar mount: edit XYZ + RPY to match your physical mount. -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="tf_base_to_lidar"
+        args="0.20 0.00 0.40   0 0 0   base_link livox_frame"/>
+
+  <!-- Camera mount: edit XYZ + RPY to match your physical mount. -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="tf_base_to_camera"
+        args="0.30 0.00 0.35   0 0 0   base_link camera_link"/>
+
+  <!--
+    NOTE: ranger_chassis_rbnx is configured with `publish_odom_tf: true`
+    in robonix_manifest.yaml, so it owns the odom→base_link edge. Do
+    NOT add a static_transform_publisher for that link here — it would
+    fight the chassis driver and the TF tree would oscillate.
+  -->
+</launch>
