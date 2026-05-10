@@ -5,22 +5,29 @@ name: robonix-ranger-mini-deploy
 # + Intel RealSense D435i stack, runs on the Jetson Orin (syswonder
 # desktop, ssh alias `robot`). On the Jetson, the latest robonix
 # source tree lives at /home/syswonder/wheatfox/robonix; rbnx is
-# `cargo run -p robonix-cli --release` or whatever wrapper the user
-# has set up.
+# expected to be installed via `make install` from that tree.
 #
 # Each `url:` package is a separate GitHub repo under enkerewpo. `rbnx
 # build` clones them into rbnx-boot/cache/<name>/ and runs each
 # package's scripts/build.sh; `rbnx boot` then spawns each one and
 # calls Driver(CMD_INIT, config_json) on its */driver gRPC interface.
 #
-# The manifest is an UNORDERED list. Boot ordering between packages is
-# handled implicitly: a package whose dep isn't ready returns
-# Driver_Response(state="deferred"); rbnx retries deferred packages
-# in a loop until the system reaches steady state. No explicit dep
-# graph in the manifest.
+# ─── Boot ordering: STRICTLY SERIAL, declaration order ─────────────────
+# rbnx boot v0.1.x launches packages STRICTLY in the YAML declaration
+# order: every primitive[i] must reach Driver(CMD_INIT) ok=true before
+# primitive[i+1] is spawned; same for service[] and skill[]. There is
+# NO "deferred" retry mechanism — Driver returning ok=false aborts the
+# whole boot (see rust/crates/robonix-cli/src/cmd/deploy.rs near the
+# `if !r.ok { bail }` line). So:
+#   1) put providers BEFORE consumers (lidar before imu-shim that reads
+#      /livox/imu; mapping before nav2; etc.);
+#   2) packages without a `*/driver` interface skip CMD_INIT entirely
+#      and are considered "up" the moment they register a cap on atlas.
+# ────────────────────────────────────────────────────────────────────────
 
 env:
-  # Override on the launching shell if needed:
+  # Override on the launching shell (or via a sourced .env, see
+  # .env.example) before `rbnx boot`:
   #   VLM_BASE_URL  for cloud-side reasoning (pilot)
   #   VLM_API_KEY
   #   VLM_MODEL
@@ -40,27 +47,29 @@ system:
       api_key: ${VLM_API_KEY}
       model: ${VLM_MODEL}
       api_format: openai
-
-  # Soma (URDF + robot_state_publisher) is on the v0.2 roadmap, not
-  # yet implemented — see Robonix dev guide §3.6 / 附录 B. For ranger
-  # bring-up, run `static_transform_publisher` from a side launch (see
-  # README.md sketch) until soma ships.
-  #
-  # Voice / speech (ASR + TTS + audio_driver) is off for ranger first
-  # bring-up — chat is text-only, goes through liaison. Drop a
-  # `speech:` block + audio primitives into this manifest later when
-  # mics are wired.
-
   liaison:
     listen: 127.0.0.1:50081
     log: info
-  nexus:
-    log: info
+
+  # Non-builtin system services. rbnx boot resolves these by name to
+  # `<robonix_source>/system/<key>/`. The robonix tree currently ships
+  # only `memory/`, `scene/`, `speech/` under that path — any other
+  # key would be silently warned-and-skipped. Keep the list minimal.
   memory:
     backend: sqlite
     log: info
   scene:
     log: info
+
+  # Soma (URDF + robot_state_publisher) is on the v0.2 roadmap, not
+  # yet implemented — see Robonix dev guide §3.6 / 附录 B. For ranger
+  # bring-up, run `static_transform_publisher` from a side launch
+  # (see side_launch/static_tf.launch.xml) until soma ships.
+  #
+  # Voice / speech (ASR + TTS + audio_driver) is off for ranger first
+  # bring-up — chat is text-only, goes through liaison. Drop a
+  # `speech:` block + audio primitives into this manifest later when
+  # mics are wired.
 
 primitive:
   # ── MID-360 lidar ───────────────────────────────────────────────────
@@ -79,14 +88,19 @@ primitive:
 
   # ── MID-360 IMU (topic shim, no ROS spawn) ──────────────────────────
   # Owns primitive/imu/*. Subscribes to /livox/imu (which mid360_lidar's
-  # livox launch publishes) and atlas-routes it. If mid360_lidar isn't
-  # initialized yet, this returns deferred and rbnx retries.
+  # livox launch publishes) and atlas-routes it.
+  # MUST stay AFTER mid360_lidar in this list — without /livox/imu live
+  # on the DDS graph, this package's Init will block on its sentinel
+  # and eventually return ok=false, aborting boot.
   - name: mid360_imu
     url: https://github.com/enkerewpo/mid360_imu_rbnx
     branch: main
+    # Driver(CMD_INIT) reads ONLY `imu_topic` + `sentinel_timeout_s`
+    # (see mid360_imu/main.py::on_init). Any other key is silently
+    # ignored.
     config:
       imu_topic: /livox/imu
-      defer_probe_s: 2.0
+      sentinel_timeout_s: 30.0
 
   # ── RealSense D435i (RGBD) ─────────────────────────────────────────
   # Owns primitive/camera/*. Spawns realsense2_camera's rs_launch.py.
@@ -98,11 +112,22 @@ primitive:
       rgb_profile: 640x480x30
       depth_profile: 848x480x30
       align_depth: true
-      enable_imu: true # published, NOT atlas-routed (mid360 IMU is canonical)
+      # Published by the RealSense driver on /camera_435i/imu but
+      # intentionally NOT atlas-routed (mid360 IMU is canonical).
+      # If you later flip this to expose primitive/imu/* from
+      # realsense, drop mid360_imu OR pick a non-conflicting cap_id —
+      # atlas allows multiple providers for the same contract but
+      # the LLM tool list will collapse them and you'll get
+      # nondeterministic routing.
+      enable_imu: false
       enable_sync: true
       sentinel_timeout_s: 30.0
 
   # ── Ranger Mini chassis ─────────────────────────────────────────────
+  # Owns primitive/chassis/*. Publishes /odom (consumed by mapping below).
+  # MUST stay enabled together with mapping.sensors.odom: true (see
+  # service.mapping below) — flipping one without the other yields
+  # silently-degraded SLAM.
   - name: ranger_chassis
     url: https://github.com/enkerewpo/ranger_chassis_rbnx
     branch: main
@@ -115,7 +140,7 @@ primitive:
 
 service:
   # ── SLAM (rtabmap) ──────────────────────────────────────────────────
-  # Discovers lidar3d + rgb + depth + imu via atlas at Init time and
+  # Discovers lidar3d + rgb + depth via atlas at Init time and
   # configures rtabmap to fuse them. Outputs service/map/{occupancy_grid,
   # pointcloud, pose, odom} on atlas — algo-agnostic for consumers.
   - name: mapping
@@ -129,27 +154,77 @@ service:
         lidar3d: true # MID-360 PointCloud2
         rgb: true # RealSense visual loop closure
         rgbd: true # RealSense depth → 3D fusion
-        # imu: rtabmap launch doesn't wire IMU yet (the comment in
-        # launch/rtabmap_2d.launch.py promises it but the code isn't
-        # there). Leave OFF for the first bring-up — the MID-360's
-        # lidar alone is usually enough for graph SLAM. Flip to true
-        # once mapping_rbnx grows imu_topic + subscribe_imu wiring.
+        # rtabmap launch in mapping_rbnx doesn't currently wire IMU
+        # (the comment in launch/rtabmap_2d.launch.py promises it but
+        # the code isn't there). Leave OFF — MID-360 lidar alone is
+        # usually enough for graph SLAM. Flip to true once mapping_rbnx
+        # grows imu_topic + subscribe_imu wiring.
         imu: false
-        # odom: chassis is powered off this run; rtabmap derives
-        # odometry internally from lidar (icp_odometry) / RGBD.
-        # Flip to true once ranger_chassis_rbnx is enabled.
-        odom: false
-  # ── Navigation ───────────────────────────────────────────────
+        # Chassis IS enabled in primitive: above (publishes /odom),
+        # so let rtabmap fuse it. If you ever disable ranger_chassis,
+        # flip this to false too — otherwise rtabmap's Init will
+        # block waiting for /odom and fail.
+        odom: true
+      # mapping_rbnx defaults use_sim_time to "true" in its resolved
+      # YAML (src/mapping_rbnx/atlas_bridge.py:288). On real hardware
+      # that makes rtabmap block waiting for /clock. Override here.
+      use_sim_time: false
+      base_frame: base_link
+      odom_frame: odom
+
+  # ── Navigation ──────────────────────────────────────────────────────
+  # nav2_wrapper_rbnx wraps upstream `nav2_bringup` (installed via apt:
+  # ros-humble-nav2-bringup; the wrapper itself vendors only the params
+  # YAMLs under config/). Owns robonix/service/navigation/*.
+  #
+  # MUST come AFTER `mapping` — on Init the wrapper queries atlas for
+  # robonix/service/map/occupancy_grid (REQUIRED — fails Init if
+  # missing) and robonix/primitive/chassis/odom (REQUIRED), plus
+  # optionally robonix/primitive/lidar/{lidar,lidar3d}. rbnx has no
+  # defer/retry; if mapping hasn't declared yet, nav2 Init returns
+  # ok=false and boot bails.
+  #
+  # Full config reference lives in the upstream package_manifest.yaml
+  # header and its README.md §"Config (passed via Driver(CMD_INIT)".
+  # Every field has a default; the values below are explicit so the
+  # deploy documents its intent instead of relying on upstream defaults
+  # that may drift.
   - name: nav2
     url: https://github.com/enkerewpo/nav2_wrapper_rbnx
     branch: main
-    config: {}
+    config:
+      # Picks config/nav2_params_slam.yml (vendored in the wrapper).
+      # Other profiles: "sim" | "default". Override entirely by setting
+      # `params_file` to an absolute path or path relative to the
+      # package root.
+      params_profile: slam
+      use_sim_time: false
+      # How long to wait for nav2's `navigate_to_pose` action server
+      # to come up after the lifecycle bringup. Jetson Orin with full
+      # nav2 stack is usually 20–30s cold, 45s gives slack for swap /
+      # concurrent SLAM warm-up. Init returns state="degraded" (not
+      # ok=false) if this trips — boot continues.
+      action_wait_s: 45.0
+      # Per-key override of atlas-resolved bindings. Leave empty to let
+      # the wrapper pick whatever atlas reports (the common case). Keys:
+      #   map, odom          — required
+      #   scan, scan_cloud   — optional
+      topic_remap: {}
 
 skill:
+  # explore_rbnx — autonomous frontier exploration. After boot it
+  # registers but stays in INACTIVE; executor sends Driver(CMD_ACTIVATE)
+  # the first time the LLM picks one of its tools (sticky lazy-activate,
+  # see executor::dispatch::ensure_skill_runnable).
+  #
+  # Driver(CMD_INIT) accepts cfg for forward-compat but ignores it —
+  # there are NO manifest-level knobs today (explore_skill/atlas_bridge.py
+  # `@cap.on_init` just logs and returns Ok). Per-invocation params
+  # (area_hint / timeout_s / max_speed_m_s) are arguments to the MCP
+  # tool `robonix/skill/explore/explore`, not to this manifest entry.
+  # Leaving `config: {}` here instead of invented keys avoids confusing
+  # the next operator into thinking they can tune explore from here.
   - name: explore
     url: https://github.com/enkerewpo/explore_rbnx
     branch: main
-    config:
-      # example place holders
-      explore_mode: frontier
-      timeout_s: 600
+    config: {}

@@ -15,62 +15,108 @@ All package URLs in `robonix_manifest.yaml` resolve from this enkerewpo GitHub o
 | `realsense_camera_rbnx`  | enkerewpo/realsense_camera_rbnx                  | primitive/camera/*    |
 | `ranger_chassis_rbnx`    | enkerewpo/ranger_chassis_rbnx                    | primitive/chassis/*   |
 | `mapping_rbnx`           | enkerewpo/mapping_rbnx                           | service/map/*         |
+| `nav2_wrapper_rbnx`      | enkerewpo/nav2_wrapper_rbnx                      | service/navigation/*  |
+| `explore_rbnx`           | enkerewpo/explore_rbnx                           | skill/explore/*       |
+
+`nav2_wrapper_rbnx` ships with `config: {}` — the wrapper applies its own defaults. If `Driver(CMD_INIT)` on nav2 returns `ok=false` on first bring-up, audit its required fields (see HANDOFF §十.9) and fill them under the `config:` block in `robonix_manifest.yaml`.
+
+## Quickstart
 
 ```bash
-# on the Jetson, in this directory:
-rbnx build .         # clones each url: package and runs its build.sh
-rbnx boot  .         # spawns each one and runs Driver(CMD_INIT, config)
+# On the Jetson, in this directory:
+cp .env.example .env             # then edit .env to fill VLM_BASE_URL / VLM_API_KEY / VLM_MODEL
+set -a; source .env; set +a      # export the vars into the current shell
+
+rbnx validate                    # static check the manifest
+rbnx build                       # clones each url: package and runs its build.sh
+rbnx boot                        # spawns each one and runs Driver(CMD_INIT, config_json)
 ```
 
-`rbnx build` writes everything to `rbnx-build/cache/<name>/` so the original working dir on the Jetson is never touched.
+`rbnx build` writes everything under `rbnx-boot/cache/<repo-name>/`. Each
+package's per-clone build artefacts go to `<pkg>/rbnx-build/`. The original
+working dir on the Jetson is never touched.
+
+`rbnx boot` blocks until you Ctrl-C; it tears down every spawned PGID in
+reverse order on exit. Detached cleanup is in `rbnx shutdown`.
 
 ## URDF — required, not shipped
 
-Soma needs a Ranger Mini URDF (`urdf_path` in the system.soma block). The URDF must include `base_link` (chassis frame; convention: ground projection of the geometric centre, X forward, Z up), `livox_frame` mount transform from `base_link`, and `camera_link` + `camera_color_optical_frame` mount transforms.
+Soma (URDF + robot_state_publisher) needs a Ranger Mini URDF to publish the static TF tree. The URDF must include `base_link` (chassis frame; convention: ground projection of the geometric centre, X forward, Z up), `livox_frame` mount transform from `base_link`, and `camera_link` + `camera_color_optical_frame` mount transforms.
 
-Until a calibrated URDF is in hand, an interim path is to launch `static_transform_publisher` for each frame manually. Sketch (drop in a side-launch, replace x y z and roll pitch yaw with your measured mount values):
+Until a calibrated URDF is in hand, an interim path is to launch `static_transform_publisher` for each frame manually. A starting-point launch file is provided at `side_launch/static_tf.launch.xml` — measure the actual mount offsets on your robot and edit the values before using it.
 
-```xml
-<launch>
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="tf_lidar"
-        args="0.20 0 0.40  0 0 0  base_link livox_frame"/>
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="tf_camera"
-        args="0.30 0 0.35  0 0 0  base_link camera_link"/>
-</launch>
+```bash
+# In a separate shell, alongside `rbnx boot`:
+ros2 launch side_launch/static_tf.launch.xml
 ```
 
-Then leave `system.soma` commented out in the manifest until the URDF is ready, and run that side-launch in another shell.
+Leave `system.soma` absent from the manifest (it is, today) until the URDF is ready.
 
 ## Verifying the bring-up
 
-After `rbnx boot`:
+After `rbnx boot` settles:
 
 ```bash
 ros2 topic hz /scanner/cloud   # ~10 Hz lidar PointCloud2
 ros2 topic hz /livox/imu       # ~200 Hz sensor_msgs/Imu
 ros2 topic hz /camera_435i/color/image_raw                    # ~30 Hz
 ros2 topic hz /camera_435i/aligned_depth_to_color/image_raw   # ~30 Hz
+ros2 topic hz /odom            # chassis odometry (~50 Hz)
 ros2 topic hz /map             # 1 Hz-ish OccupancyGrid (from rtabmap)
 ros2 topic echo /robonix/map/pose --once
-rbnx caps                      # all the contracts above should be listed
+
+rbnx caps -v                   # all primitive/* + service/map/* + system/* should show [ACTIVE].
+                               # explore (skill) is expected to be [INACTIVE] until first LLM call.
+rbnx contracts                 # static schema view of every contract atlas loaded
+rbnx tools                     # exact MCP tool list the pilot exposes to the LLM
 ```
 
 Open RViz and load the rtabmap visualization config to see the map build up.
 
-## Defer / boot sequencing
+## Boot sequencing — actual mechanics
 
-The deploy manifest is an unordered list. Boot ordering happens at runtime via the defer protocol: a package whose dep isn't ready returns `Driver_Response(state="deferred")` and `rbnx boot` retries it periodically until the system reaches steady state. There's no explicit dep graph in the manifest — each package only declares what it needs at the moment its Init runs.
+`rbnx boot` launches every package **strictly serially in YAML declaration order**: each `primitive[i]` must reach Driver(CMD_INIT) `ok=true` (within `DRIVER_INIT_TIMEOUT = 90s`) before `primitive[i+1]` is spawned; same for `service:` and `skill:`. There is **no** automatic retry — a package whose Driver returns `ok=false` aborts the entire boot. Source: `rust/crates/robonix-cli/src/cmd/deploy.rs` (`if !r.ok { bail }` near line 1430, `boot_section_serial` loop above it).
 
 Concretely, the cascade for this stack:
 
 ```
-mid360_lidar.Init    →  spawns livox driver, declares lidar3d
+mid360_lidar.Init     → spawns livox driver, declares lidar3d
                         (also makes /livox/imu live on the bus)
-mid360_imu.Init      →  defers if /livox/imu silent; succeeds on retry
-                        once mid360_lidar's launch is publishing
-realsense_camera.Init→  spawns realsense, declares rgb + depth
-mapping.Init         →  queries atlas for lidar3d, rgb, depth, imu;
-                        defers any not yet present; succeeds when all are
+mid360_imu.Init       → subscribes /livox/imu, declares primitive/imu/*
+                        (FAILS the boot if mid360_lidar didn't actually
+                        bring /livox/imu up — there's no retry)
+realsense_camera.Init → spawns realsense, declares rgb + depth
+ranger_chassis.Init   → opens CAN, publishes /odom, declares chassis/*
+mapping.Init          → queries atlas for lidar3d + rgb + depth + odom,
+                        configures rtabmap to fuse them
+nav2.Init             → queries atlas for service/map/occupancy_grid
+                        (must see mapping's declaration — ordering matters)
+explore               → registers; stays INACTIVE until the LLM picks
+                        one of its tools (executor.dispatch sticky-activates)
+```
+
+If you need to reorder: edit `robonix_manifest.yaml`. The list **is** the dependency declaration; consumers must come after providers.
+
+## Layout (after first boot)
+
+```
+ranger_mini_deploy/
+├── robonix_manifest.yaml
+├── README.md
+├── HANDOFF.md
+├── .env.example
+├── .gitignore
+├── side_launch/
+│   ├── static_tf.launch.xml
+│   └── README.md
+├── urdf/
+│   └── README.md
+└── rbnx-boot/                  ← gitignored, auto-generated
+    ├── cache/<pkg>/            ← git clone of every url: package
+    │   └── rbnx-build/         ← per-clone build artefacts + sentinel
+    ├── instances/<pkg>.json    ← per-package config snapshot (debug only)
+    ├── logs/<component>.log    ← stdout+stderr of every spawned process
+    └── state.json              ← PGID/PID list for `rbnx shutdown`
 ```
 
 ## License
