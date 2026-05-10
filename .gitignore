@@ -1,6 +1,36 @@
-rbnx-build/
+# rbnx auto-generated state — git clone cache, instance config snapshots,
+# logs, PGID/PID list. Never commit any of these.
 rbnx-boot/
+rbnx-build/
+
+# Per-package codegen artefacts (if any package leaves them at top level).
+proto_gen/
+robonix_mcp_types/
+
+# Logs
+*.log
+
+# Secrets (real .env is local-only; commit .env.example as the template).
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Editor / IDE
 .vscode/
 .idea/
+.cursor/
+.claude/
 *.swp
-__pycache__/
+
+# OS
+.DS_Store
+
+# Temp
+tmp/
+*.tmp
