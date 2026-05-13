@@ -144,7 +144,7 @@ service:
   # configures rtabmap to fuse them. Outputs service/map/{occupancy_grid,
   # pointcloud, pose, odom} on atlas — algo-agnostic for consumers.
   - name: mapping
-    url: https://github.com/enkerewpo/mapping_rbnx
+    url: https://github.com/lhw2002426/mapping_rbnx
     branch: main
     config:
       algo: rtabmap
