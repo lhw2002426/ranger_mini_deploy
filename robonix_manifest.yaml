@@ -7,7 +7,7 @@ name: robonix-ranger-mini-deploy
 # source tree lives at /home/syswonder/wheatfox/robonix; rbnx is
 # expected to be installed via `make install` from that tree.
 #
-# Each `url:` package is a separate GitHub repo under enkerewpo. `rbnx
+# Each `url:` package is a separate GitHub repo under lhw2002426. `rbnx
 # build` clones them into rbnx-boot/cache/<name>/ and runs each
 # package's scripts/build.sh; `rbnx boot` then spawns each one and
 # calls Driver(CMD_INIT, config_json) on its */driver gRPC interface.
@@ -32,6 +32,41 @@ env:
   #   VLM_API_KEY
   #   VLM_MODEL
 
+  # ── scene: run native, no docker ─────────────────────────────────────
+  # `system/scene` ships with a docker-default start.sh; we want it to
+  # exec native on the Jetson Orin so it joins the same DDS namespace
+  # as every other package on this host without an extra container hop.
+  # `start.sh` reads ROBONIX_SCENE_FORCE first and ROBONIX_SCENE_PLATFORM
+  # second; either alone is sufficient. We set both for clarity.
+  #
+  # Pre-conditions (run once on the Jetson, BEFORE `rbnx boot`):
+  #   bash $ROBONIX_SOURCE_PATH/system/scene/scripts/setup_native.sh
+  #   # creates rbnx-build/venv with torch/ultralytics/open_clip/open3d/
+  #   # concept-graphs etc., pre-fetches yolov8l-world.pt + mobile_sam.pt
+  #   # into docker/_weights/, pre-warms CLIP caches.
+  #
+  # Then on every boot the venv path is picked up via
+  # SCENE_NATIVE_PYTHON below — set explicitly so we don't depend on
+  # the operator's interactive shell having activated the venv.
+  ROBONIX_SCENE_FORCE: native
+  ROBONIX_SCENE_PLATFORM: jetson_orin
+  # Path to the venv created by setup_native.sh. Defaults to
+  # rbnx-build/venv inside the scene package; the line below makes
+  # that absolute so PYTHONPATH inheritance in `rbnx boot` doesn't
+  # confuse it. Override on the launching shell if the venv lives
+  # elsewhere (e.g. a system-wide /opt/scene-venv/).
+  SCENE_NATIVE_PYTHON: ${ROBONIX_SOURCE_PATH}/system/scene/rbnx-build/venv/bin/python
+  # Web debug UI port — http://<jetson-ip>:50107 once scene is up.
+  # Set to 0 to disable the web UI (registry stays live, only the
+  # Starlette/three.js viewer is gated off).
+  SCENE_WEB_PORT: "50107"
+  # Force CPU on the Jetson dev machines that don't have CUDA wired up.
+  # Comment out (or set "") on hosts with working nvidia-smi to use GPU.
+  # SCENE_CG_FORCE_CPU: "1"
+  # Hugging Face mirror for CN networks — first-run only, after the
+  # CLIP cache is pre-warmed by setup_native.sh this is a no-op.
+  HF_ENDPOINT: https://hf-mirror.com
+
 system:
   atlas:
     listen: 127.0.0.1:50051
@@ -51,6 +86,28 @@ system:
     listen: 127.0.0.1:50081
     log: info
 
+  # ── soma ────────────────────────────────────────────────────────────
+  # 本体描述服务（robonix v0.2 起新增，PR #91 引入）。在 atlas 之后、
+  # 其他 primitive 之前启动；提供 robonix/system/soma/{get_ymal,
+  # get_urdf} 两个 cap，给 pilot/scene/nav2 等消费者读 URDF 与 soma
+  # body description。
+  #
+  # 设计：docs/Robonix 开发文档.md §五
+  # 接入计划：docs/ranger_mini_soma_integration_plan.md
+  # 部署 cheatsheet：./SOMA_DEPLOY.md
+  #
+  # 注意：rbnx boot 解析 `system.<key>:` 到
+  # $ROBONIX_SOURCE_PATH/system/<key>/ 包；需要部署机的 robonix
+  # 源码已经包含 system/soma/ 目录（PR #91 引入）。如果部署机上的
+  # rbnx 还不认识这个 key（例如 PR91 dispatcher 尚未合主），
+  # 注释掉本段并改用 SOMA_DEPLOY.md §2.5 的方案 2 手工启 soma。
+  soma:
+    listen: 127.0.0.1:50091
+    log: info
+    # robonix-soma 自己的配置文件，相对 deploy 根目录解析。
+    # 内容见 ./soma_config.local.yaml。
+    config: ./soma_config.local.yaml
+
   # Non-builtin system services. rbnx boot resolves these by name to
   # `<robonix_source>/system/<key>/`. The robonix tree currently ships
   # only `memory/`, `scene/`, `speech/` under that path — any other
@@ -58,13 +115,53 @@ system:
   memory:
     backend: sqlite
     log: info
+
+  # ── scene ────────────────────────────────────────────────────────────
+  # Live semantic + geometric map. Owns robonix/system/scene/*.
+  #
+  # Run mode for this deploy: NATIVE (no docker). The mode switch lives
+  # in the top-level `env:` block above (ROBONIX_SCENE_FORCE=native).
+  # Before first boot, run the one-shot installer on this Jetson:
+  #
+  #   bash ${ROBONIX_SOURCE_PATH}/system/scene/scripts/setup_native.sh
+  #
+  # which materialises rbnx-build/venv with torch + ultralytics +
+  # open_clip + open3d + concept-graphs (ali-dev branch), pre-fetches
+  # yolov8l-world.pt + mobile_sam.pt into docker/_weights/, and warms
+  # the openai-clip + open_clip caches. Idempotent — safe to re-run.
+  #
+  # Verify scene is up after `rbnx boot`:
+  #   1. `rbnx caps -v | grep scene`            — both tools should be ACTIVE.
+  #   2. `rbnx tools | grep scene`              — list_objects + goal_near.
+  #   3. `curl -fsS http://127.0.0.1:50107/api/state | head -c 200`
+  #                                              — web UI responds.
+  #   4. `tail -f rbnx-boot/cache/scene/rbnx-build/data/scene.log` to watch
+  #      perception ticks; first detection lands within ~5s of camera frames
+  #      flowing.
+  #
+  # On failure the most likely culprit is a missing perception dep —
+  # `bash ${ROBONIX_SOURCE_PATH}/system/scene/scripts/start_native.sh`
+  # has a fail-loud import probe that lists exactly which Python
+  # module is missing and how to install it.
+  #
+  # observations: omitted — scene's auto-discovery (service.py
+  # `_resolve_auto`) walks atlas for the camera RGB/depth + lidar3d +
+  # service/map/{pose,occupancy_grid} contracts that the manifest's
+  # primitive: + service: blocks below already declare. Override here
+  # only if you want to drop a stream (e.g. skip depth on CPU-only
+  # hardware) or wire a contract that scene's _SCENE_CONTRACTS table
+  # doesn't know about.
   scene:
     log: info
 
-  # Soma (URDF + robot_state_publisher) is on the v0.2 roadmap, not
-  # yet implemented — see Robonix dev guide §3.6 / 附录 B. For ranger
-  # bring-up, run `static_transform_publisher` from a side launch
-  # (see side_launch/static_tf.launch.xml) until soma ships.
+  # Soma (URDF + body description service) shipped via PR #91 — see
+  # the system.soma block above and ./SOMA_DEPLOY.md. v0.1 of soma is
+  # a passive registry for soma.ymal + URDF text; it does NOT yet
+  # spawn robot_state_publisher, so the static_transform_publisher
+  # stand-in (`ranger_description` primitive below) is still required
+  # to keep /tf_static populated for rtabmap / nav2. When upstream
+  # ships the sensor_extrinsics srv and consumers stop relying on tf2
+  # for body→sensor edges, drop ranger_description from this manifest.
   #
   # Voice / speech (ASR + TTS + audio_driver) is off for ranger first
   # bring-up — chat is text-only, goes through liaison. Drop a
@@ -72,11 +169,39 @@ system:
   # mics are wired.
 
 primitive:
+  # ── Static TF stand-in (until system.soma ships) ────────────────────
+  # `ros2 launch` wrapper. start.sh execs ros2 launch directly — no
+  # atlas_bridge, no Driver(CMD_INIT) handler, capabilities: [] in the
+  # package manifest. rbnx boot registers the cap on atlas the moment
+  # start.sh spawns and lets the launch tree run for the lifetime of
+  # the deploy (SIGTERM-on-PGID teardown handles cleanup).
+  #
+  # MUST stay FIRST in this primitive: list — mapping (rtabmap) and
+  # nav2 do TF lookups during their own Init, and rbnx boot's
+  # strict-serial ordering needs the TFs live before downstream Init
+  # runs. ranger_chassis owns odom → base_link, but the static
+  # body→sensor edges have no other publisher in the current deploy;
+  # without this package, rtabmap's RGBD path silently fails TF
+  # lookups and nav goals land 30 cm off.
+  #
+  # The mount-offset defaults baked into the package's launch file
+  # are PLACEHOLDERS derived from CAD. To override per-axis, edit
+  # the <arg> defaults in static_tf.launch.xml in the package source
+  # (https://github.com/lhw2002426/ranger_description_rbnx) and
+  # re-push — there's no manifest-side `launch_args` block on this
+  # package because that path required a Python wrapper we deleted
+  # for simplicity.
+  - name: ranger_description
+    url: https://github.com/lhw2002426/ranger_description_rbnx
+    branch: main
+    # config: {} — package's start.sh ignores config_json (no
+    # Driver(CMD_INIT) handler).
+
   # ── MID-360 lidar ───────────────────────────────────────────────────
   # Owns primitive/lidar/*. Spawns livox_ros_driver2 in Driver.Init.
   # Also makes /livox/imu live on the bus (consumed by mid360_imu below).
   - name: mid360_lidar
-    url: https://github.com/enkerewpo/mid360_lidar_rbnx
+    url: https://github.com/lhw2002426/mid360_lidar_rbnx
     branch: main
     config:
       lidar_topic: /scanner/cloud
@@ -93,7 +218,7 @@ primitive:
   # on the DDS graph, this package's Init will block on its sentinel
   # and eventually return ok=false, aborting boot.
   - name: mid360_imu
-    url: https://github.com/enkerewpo/mid360_imu_rbnx
+    url: https://github.com/lhw2002426/mid360_imu_rbnx
     branch: main
     # Driver(CMD_INIT) reads ONLY `imu_topic` + `sentinel_timeout_s`
     # (see mid360_imu/main.py::on_init). Any other key is silently
@@ -105,7 +230,7 @@ primitive:
   # ── RealSense D435i (RGBD) ─────────────────────────────────────────
   # Owns primitive/camera/*. Spawns realsense2_camera's rs_launch.py.
   - name: realsense_camera
-    url: https://github.com/enkerewpo/realsense_camera_rbnx
+    url: https://github.com/lhw2002426/realsense_camera_rbnx
     branch: main
     config:
       camera_name: camera_435i
@@ -129,7 +254,7 @@ primitive:
   # service.mapping below) — flipping one without the other yields
   # silently-degraded SLAM.
   - name: ranger_chassis
-    url: https://github.com/enkerewpo/ranger_chassis_rbnx
+    url: https://github.com/lhw2002426/ranger_chassis_rbnx
     branch: main
     config:
       port_name: can_ranger
@@ -171,6 +296,10 @@ service:
       use_sim_time: false
       base_frame: base_link
       odom_frame: odom
+      # Fresh mapping mode: do not set map_database_path here. If a prebuilt
+      # RTAB-Map database is needed later, set map_database_path explicitly
+      # and choose map_mode: mapping|localization.
+      map_mode: mapping
 
   # ── Navigation ──────────────────────────────────────────────────────
   # nav2_wrapper_rbnx wraps upstream `nav2_bringup` (installed via apt:
@@ -190,7 +319,7 @@ service:
   # deploy documents its intent instead of relying on upstream defaults
   # that may drift.
   - name: nav2
-    url: https://github.com/enkerewpo/nav2_wrapper_rbnx
+    url: https://github.com/lhw2002426/nav2_wrapper_rbnx
     branch: main
     config:
       # Picks config/nav2_params_slam.yml (vendored in the wrapper).
@@ -225,6 +354,6 @@ skill:
   # Leaving `config: {}` here instead of invented keys avoids confusing
   # the next operator into thinking they can tune explore from here.
   - name: explore
-    url: https://github.com/enkerewpo/explore_rbnx
+    url: https://github.com/lhw2002426/explore_rbnx
     branch: main
     config: {}

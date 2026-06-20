@@ -1,0 +1,85 @@
+# Soma 接入：robonix_manifest.yaml 增量改动指引
+#
+# 这不是一份可以直接 `git apply` 的 unified diff（diff 行号会随
+# manifest 演化而漂移），而是一份"在哪里加什么"的人类可读 patch。
+# 在部署机上手动按本文件指引编辑 robonix_manifest.yaml 即可。
+#
+# 整个改动只**新增**一段，不删除、不修改任何现有内容。
+#
+# ───────────────────────────────────────────────────────────────────
+# 改动点 1：在 `system:` 块里新增 `soma:` 子块
+# ───────────────────────────────────────────────────────────────────
+#
+# 位置：在 `system:` 块的 `liaison:` 配置之后、`memory:` 之前插入。
+#       （或者放在 `system:` 块任意你喜欢的位置——`rbnx boot` 内部
+#        把 system 块当字典处理，顺序不影响启动序列；启动序列由
+#        primitive: / service: / skill: 的列表顺序决定，这三块不动。）
+#
+# 在你的当前 manifest 里，`liaison:` 大约在第 86 行结束（参见下面
+# 的"上下文锚"），紧接着加：
+#
+#   liaison:                          ← 这是 system: 内已存在的最后一项
+#     listen: 127.0.0.1:50081
+#     log: info
+#                                     ← 这里是空行，下面整段是新增
+#   # ── soma ────────────────────────────────────────────────────────────
+#   # 本体描述服务（robonix v0.2 起新增，PR #91 引入）。在 atlas 之后、
+#   # 其他 primitive 之前启动；提供 robonix/system/soma/{get_ymal,
+#   # get_urdf} 两个 cap，给 pilot/scene/nav2 等消费者读 URDF 与 soma
+#   # body description。
+#   #
+#   # 设计：docs/Robonix 开发文档.md §五
+#   # 接入计划：docs/ranger_mini_soma_integration_plan.md
+#   #
+#   # 注意：rbnx boot 解析 `system.<key>:` 到
+#   # $ROBONIX_SOURCE_PATH/system/<key>/ 包，需要部署机的 robonix
+#   # 源码已经包含 system/soma/ 目录（PR #91 引入）。
+#   soma:
+#     listen: 127.0.0.1:50091
+#     log: info
+#     # robonix-soma 自己的配置文件。路径相对 deploy 根目录解析。
+#     # 内容见 ./soma_config.local.yaml。
+#     config: ./soma_config.local.yaml
+#                                     ← 空行
+#   # Non-builtin system services. ……（这里是已有的 memory: 注释，不动）
+#   memory:                           ← 已存在的下一项，保持不动
+#     backend: sqlite
+#     log: info
+#
+# ───────────────────────────────────────────────────────────────────
+# 改动点 2：无（其余 primitive: / service: / skill: 块不动）
+# ───────────────────────────────────────────────────────────────────
+# 阶段 A 保留 ranger_description（已确认）。该 primitive 在
+# manifest primitive: 列表里、第一个，保持原状即可。
+#
+# ───────────────────────────────────────────────────────────────────
+# 验证 patch 是否生效
+# ───────────────────────────────────────────────────────────────────
+# rbnx validate                  # manifest schema 是否能 parse
+# grep -A 5 '^  soma:' robonix_manifest.yaml   # 应能看到上面新增的 5 行
+#
+# rbnx boot 之后：
+# rbnx caps | grep soma
+#   → robonix/system/soma/get_ymal  [ACTIVE]
+#   → robonix/system/soma/get_urdf  [ACTIVE]
+#
+# ───────────────────────────────────────────────────────────────────
+# 兜底：如果 rbnx boot 不认识 system.soma key（合主延迟、dispatcher 缺失等）
+# ───────────────────────────────────────────────────────────────────
+# 不要应用上面的改动点 1（保持 manifest 不变），改用方案 2 手工启动 soma：
+#
+#   终端 1：
+#     ssh robot
+#     robonix-atlas                                         # 让 atlas 先就位
+#
+#   终端 2：
+#     ssh robot
+#     cd ~/lhw/ranger_mini_deploy/
+#     robonix-soma --config ./soma_config.local.yaml
+#
+#   终端 3：
+#     ssh robot
+#     cd ~/lhw/ranger_mini_deploy/
+#     rbnx boot                                             # 检测到 atlas 已起会跳过自己起
+#
+# 详见 docs/ranger_mini_soma_integration_plan.md §A.5。

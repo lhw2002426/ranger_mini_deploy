@@ -221,7 +221,7 @@ rbnx clean -f robonix_manifest.yaml --cache  # 同上，并 wipe rbnx-boot/cache
 
 | 功能 | 状态 | 备注 |
 |---|---|---|
-| soma（URDF / robot_state_publisher）| ☐ | v0.2 roadmap，未实现；用 `side_launch/static_tf.launch.xml` 顶（先量好实际安装位移再 launch） |
+| soma（URDF / robot_state_publisher）| ☐ | v0.2 roadmap，未实现；用 `ranger_description` primitive 顶（spawn 两个 static_transform_publisher，先量好实际安装位移再改 manifest 里的 `launch_args`） |
 | 语音 / speech 服务 | ☐ | 麦克风未接，audio primitives 也没列在 manifest |
 | liaison voice loop | ☐ | 同上；但 liaison 自身**开**了，因为 `rbnx chat` 要走它 |
 | nav2 | ⚠️ `config: {}` | manifest 里**启用**但 config 留空，走 wrapper 默认值；Init 挂了就按 §十.9 审 `on_init` 补字段 |

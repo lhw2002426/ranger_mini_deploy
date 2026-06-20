@@ -41,16 +41,11 @@ reverse order on exit. Detached cleanup is in `rbnx shutdown`.
 
 ## URDF — required, not shipped
 
-Soma (URDF + robot_state_publisher) needs a Ranger Mini URDF to publish the static TF tree. The URDF must include `base_link` (chassis frame; convention: ground projection of the geometric centre, X forward, Z up), `livox_frame` mount transform from `base_link`, and `camera_link` + `camera_color_optical_frame` mount transforms.
+Soma (URDF + robot_state_publisher) needs a Ranger Mini URDF to publish the static TF tree. The URDF must include `base_link` (chassis frame; convention: ground projection of the geometric centre, X forward, Z up), `livox_frame` mount transform from `base_link`, and `camera_435i_link` + `camera_435i_color_optical_frame` mount transforms.
 
-Until a calibrated URDF is in hand, an interim path is to launch `static_transform_publisher` for each frame manually. A starting-point launch file is provided at `side_launch/static_tf.launch.xml` — measure the actual mount offsets on your robot and edit the values before using it.
+Until a calibrated URDF is in hand, the **`ranger_description` primitive** in the manifest stands in for soma: it spawns two `static_transform_publisher` nodes (`base_link → livox_frame` and `base_link → camera_435i_link`) at boot. The mount-offset defaults baked into its launch file are placeholders derived from CAD — measure your physical robot and override via the `launch_args` block under that primitive in `robonix_manifest.yaml`. Source lives at <https://github.com/lhw2002426/ranger_description_rbnx>.
 
-```bash
-# In a separate shell, alongside `rbnx boot`:
-ros2 launch side_launch/static_tf.launch.xml
-```
-
-Leave `system.soma` absent from the manifest (it is, today) until the URDF is ready.
+When the URDF is ready, drop `ranger_description` from the manifest and add `system.soma.urdf_path` instead.
 
 ## Verifying the bring-up
 
@@ -106,9 +101,6 @@ ranger_mini_deploy/
 ├── HANDOFF.md
 ├── .env.example
 ├── .gitignore
-├── side_launch/
-│   ├── static_tf.launch.xml
-│   └── README.md
 ├── urdf/
 │   └── README.md
 └── rbnx-boot/                  ← gitignored, auto-generated

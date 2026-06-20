@@ -1,0 +1,34 @@
+# robonix-soma process config.
+#
+# Path resolution (PR91 system/soma/src/config.rs):
+#   - relative `deployments` are resolved against `robonix_root`
+#   - `robonix_root` itself is resolved against THIS config file's
+#     directory
+# So `robonix_root: .` + `deployments: [.]` makes soma load the
+# deployment in the same directory as this file (i.e. the deploy root).
+#
+# Run:
+#   robonix-soma --config /path/to/this/file
+#
+# References:
+#   - integration plan: ../docs/ranger_mini_soma_integration_plan.md
+#   - PR91 README:      <robonix>/system/soma/README.md
+
+atlas_endpoint: 127.0.0.1:50051
+listen:        127.0.0.1:50091
+provider_id:   soma
+
+# This deploy directory is itself the body package.
+robonix_root: .
+deployments:
+  - .
+
+# Single-robot deploy → empty robot_id in get_ymal/get_urdf requests
+# resolves to this id automatically.
+default_robot: ranger_mini_01
+
+# Stage A: do NOT let soma fork `rbnx start` for primitive/skill
+# packages. rbnx boot keeps owning that. Avoids double-spawn races and
+# keeps the existing manifest semantics intact.
+start_packages: false
+rbnx_bin:      rbnx
