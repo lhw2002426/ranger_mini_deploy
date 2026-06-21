@@ -172,7 +172,7 @@ system:
 
   # Soma (URDF + body description service) shipped via PR #91 — see
   # the system.soma block above and ./SOMA_DEPLOY.md. v0.1 of soma is
-  # a passive registry for soma.ymal + URDF text; it does NOT yet
+  # a passive registry for soma.yaml + URDF text; it does NOT yet
   # spawn robot_state_publisher, so the static_transform_publisher
   # stand-in (`ranger_description` primitive below) is still required
   # to keep /tf_static populated for rtabmap / nav2. When upstream

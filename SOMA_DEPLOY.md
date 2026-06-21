@@ -14,7 +14,7 @@
 
 ```
 ranger_mini_deploy/
-├── soma.ymal                                ← 新增（本机产出）
+├── soma.yaml                                ← 新增（本机产出）
 ├── soma_config.local.yaml                   ← 新增（本机产出）
 ├── urdf/
 │   └── ranger_mini.urdf                     ← 新增（本机产出，含底盘+雷达+相机 mount）
@@ -58,7 +58,7 @@ cd /Users/howenliu/lab/ranger_mini_deploy
 DEPLOY_REMOTE=robot:~/lhw/ranger_mini_deploy/
 
 scp robonix_manifest.yaml                  "$DEPLOY_REMOTE"   # ★ 覆盖
-scp soma.ymal                              "$DEPLOY_REMOTE"
+scp soma.yaml                              "$DEPLOY_REMOTE"
 scp soma_config.local.yaml                 "$DEPLOY_REMOTE"
 scp urdf/ranger_mini.urdf                  "$DEPLOY_REMOTE/urdf/"
 scp robonix_manifest.yaml.soma.patch       "$DEPLOY_REMOTE"   # 留作参考；如不需要可省
@@ -89,7 +89,7 @@ rbnx boot
 
 ```bash
 # 9 条验收
-ls soma.ymal urdf/ranger_mini.urdf soma_config.local.yaml
+ls soma.yaml urdf/ranger_mini.urdf soma_config.local.yaml
 robonix-soma --help                          # 已 install
 rbnx caps | grep soma                        # 两条 get_ymal / get_urdf 都 ACTIVE
 rbnx caps -v | grep -A 3 'robonix/system/soma'
@@ -133,7 +133,7 @@ rbnx boot
 |---|---|---|
 | `robonix-soma: command not found` | install 失败 | 回 §2.1 重做 `make install` |
 | `rbnx caps` 看不到 soma 两条 cap | atlas 没起，或 soma 启动后 crash | `rbnx logs` / `journalctl` 查 soma 进程 stdout |
-| `unknown Soma robot_id ''` | soma_config.local.yaml 的 `default_robot` 拼错或 `soma.ymal` 的 `robot.id` 不一致 | 两处都应是 `ranger_mini_01` |
+| `unknown Soma robot_id ''` | soma_config.local.yaml 的 `default_robot` 拼错或 `soma.yaml` 的 `robot.id` 不一致 | 两处都应是 `ranger_mini_01` |
 | `no Soma YMAL/YAML file found` | soma 进程 cwd 不对，没找到 deployment dir | 用 `--config` 传**绝对路径**或者从 deploy 目录里跑 soma |
 | `<robot name="ranger_mini_v2">` 但缺 `<link name="livox_frame"/>` | URDF 没拷全 / 拷的是旧版 | 重新 scp `urdf/ranger_mini.urdf` |
 | 整套栈起来后 rtabmap 报 TF 失败 | URDF 里的 placeholder 数字与现实差太多，但更可能是 ranger_description 没起来——本阶段 ranger_description 仍是 TF 主源 | 检查 `rbnx caps` 里 `ranger_description` 是 ACTIVE |
