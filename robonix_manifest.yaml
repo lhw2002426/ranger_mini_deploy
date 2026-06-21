@@ -373,3 +373,30 @@ skill:
     url: https://github.com/lhw2002426/explore_rbnx
     branch: main
     config: {}
+
+  # soma_bridge_rbnx — temporary gRPC→MCP bridge for Soma.
+  #
+  # PR91 ships robonix-soma with two ATLAS caps registered as gRPC:
+  #   robonix/system/soma/get_yaml  (grpc)
+  #   robonix/system/soma/get_urdf  (grpc)
+  # but pilot's MCP-tool discovery only sees transport=mcp caps. So
+  # the LLM cannot reach Soma directly. This skill is a thin forwarder
+  # that exposes two MCP caps with byte-equivalent shapes and forwards
+  # each call into the upstream Soma gRPC RPC. Pilot's discovery picks
+  # the MCP caps up, the LLM can call them, the data round-trips
+  # through real Soma.
+  #
+  # Remove this entry the moment upstream pilot grows native Soma
+  # awareness (renders soma.yaml into the system prompt, or
+  # advertises soma over mcp itself).
+  #
+  # Dependency: needs system.soma ACTIVE before it can activate. boot
+  # order is: atlas → soma → primitives/services → skills (lazy), so
+  # by the time pilot triggers CMD_ACTIVATE on this skill, soma is
+  # already up.
+  #
+  # Config: none. The bridge is a pure transport adapter, no knobs.
+  - name: soma_bridge
+    url: https://github.com/lhw2002426/soma_bridge_rbnx
+    branch: main
+    config: {}
