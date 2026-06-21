@@ -104,9 +104,23 @@ system:
   soma:
     listen: 127.0.0.1:50091
     log: info
-    # robonix-soma 自己的配置文件，相对 deploy 根目录解析。
-    # 内容见 ./soma_config.local.yaml。
-    config: ./soma_config.local.yaml
+    provider_id: soma
+    default_robot: ranger_mini_01
+    # rbnx 把 robonix_root + deployments 字段透传给 soma 的 CLI。
+    #
+    # ⚠️ 不要用 "." —— PR91 system/soma/src/config.rs::normalize_path
+    # 把 Component::CurDir 整段丢弃，最终 deployment 路径会变成空
+    # PathBuf，soma 会报 "no Soma YAML file found in ''".
+    # 写 deploy 目录的绝对路径最稳。
+    robonix_root: /home/syswonder/lhw/ranger_mini_deploy
+    deployments:
+      - /home/syswonder/lhw/ranger_mini_deploy
+    start_packages: false
+    # ⚠️ 不要再用 config: ./soma_config.local.yaml —— 走 CLI 直传可以
+    # 完全绕过 soma_config.local.yaml，避免它里面的 "robonix_root: ."
+    # 触发 PR91 上述空 PathBuf bug。soma_config.local.yaml 文件保留
+    # 但不再被 rbnx boot 使用，方便阶段 A 的方案 2 兜底（手工
+    # `robonix-soma --config soma_config.local.yaml`）时直接用。
 
   # Non-builtin system services. rbnx boot resolves these by name to
   # `<robonix_source>/system/<key>/`. The robonix tree currently ships

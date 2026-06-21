@@ -1,14 +1,16 @@
 # robonix-soma process config.
 #
-# Path resolution (PR91 system/soma/src/config.rs):
-#   - relative `deployments` are resolved against `robonix_root`
-#   - `robonix_root` itself is resolved against THIS config file's
-#     directory
-# So `robonix_root: .` + `deployments: [.]` makes soma load the
-# deployment in the same directory as this file (i.e. the deploy root).
+# 注：在 rbnx boot 启动 soma 时 **不会**用这个文件——manifest 里的
+# system.soma 块通过 CLI 直接给 soma 传 --deployment / --robonix-root，
+# 已经完整覆盖 soma 启动所需。
 #
-# Run:
-#   robonix-soma --config /path/to/this/file
+# 本文件仅供 SOMA_DEPLOY.md §2.5 的方案 2 手工启动 soma 时使用：
+#     robonix-soma --config /home/syswonder/lhw/ranger_mini_deploy/soma_config.local.yaml
+#
+# 路径必须为绝对路径——PR91 的 system/soma/src/config.rs::normalize_path
+# 会把 Component::CurDir（即纯 "."）整段丢弃，使得 `robonix_root: .` +
+# `deployments: [.]` 在 normalize 后变成空 PathBuf，soma 启动时报
+# "no Soma YAML file found in ''". 改用绝对路径可彻底绕开。
 #
 # References:
 #   - integration plan: ../docs/ranger_mini_soma_integration_plan.md
@@ -18,10 +20,10 @@ atlas_endpoint: 127.0.0.1:50051
 listen:        127.0.0.1:50091
 provider_id:   soma
 
-# This deploy directory is itself the body package.
-robonix_root: .
+# 绝对路径——见上方对 normalize_path 的说明。
+robonix_root: /home/syswonder/lhw/ranger_mini_deploy
 deployments:
-  - .
+  - /home/syswonder/lhw/ranger_mini_deploy
 
 # Single-robot deploy → empty robot_id in get_ymal/get_urdf requests
 # resolves to this id automatically.
