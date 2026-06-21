@@ -106,21 +106,23 @@ system:
     log: info
     provider_id: soma
     default_robot: ranger_mini_01
-    # rbnx 把 robonix_root + deployments 字段透传给 soma 的 CLI。
+    # 把所有 deployment / start_packages / robonix_root 配置都放
+    # 到 soma_config.local.yaml 里走 --config 加载，避开两个 PR91 bug：
     #
-    # ⚠️ 不要用 "." —— PR91 system/soma/src/config.rs::normalize_path
-    # 把 Component::CurDir 整段丢弃，最终 deployment 路径会变成空
-    # PathBuf，soma 会报 "no Soma YAML file found in ''".
-    # 写 deploy 目录的绝对路径最稳。
-    robonix_root: /home/syswonder/lhw/ranger_mini_deploy
-    deployments:
-      - /home/syswonder/lhw/ranger_mini_deploy
-    start_packages: false
-    # ⚠️ 不要再用 config: ./soma_config.local.yaml —— 走 CLI 直传可以
-    # 完全绕过 soma_config.local.yaml，避免它里面的 "robonix_root: ."
-    # 触发 PR91 上述空 PathBuf bug。soma_config.local.yaml 文件保留
-    # 但不再被 rbnx boot 使用，方便阶段 A 的方案 2 兜底（手工
-    # `robonix-soma --config soma_config.local.yaml`）时直接用。
+    # Bug 1：rbnx system_cli_args 会把 manifest 的 `start_packages: false`
+    #        翻译成 CLI `--start-packages false`，但 PR91 soma 的
+    #        `--start-packages` 是 flag（无值），导致 soma 启动报
+    #        `unexpected argument 'false'`.
+    #
+    # Bug 2：PR91 system/soma/src/config.rs::normalize_path 会把
+    #        Component::CurDir 整段丢弃，导致 `robonix_root: .` +
+    #        `deployments: [.]` 在 normalize 后变成空 PathBuf。
+    #        soma_config.local.yaml 里都用绝对路径绕开。
+    #
+    # ⚠️ --config 走 soma 进程的 cwd 解析。rbnx boot 的 cwd 是你执行
+    # `rbnx boot` 时的 shell cwd（通常就是 deploy 目录）。为可靠起见
+    # 直接用绝对路径，不要写 ./。
+    config: /home/syswonder/lhw/ranger_mini_deploy/soma_config.local.yaml
 
   # Non-builtin system services. rbnx boot resolves these by name to
   # `<robonix_source>/system/<key>/`. The robonix tree currently ships
