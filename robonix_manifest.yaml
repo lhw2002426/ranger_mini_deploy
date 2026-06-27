@@ -87,41 +87,52 @@ system:
     log: info
 
   # ── soma ────────────────────────────────────────────────────────────
-  # 本体描述服务（robonix v0.2 起新增，PR #91 引入）。在 atlas 之后、
-  # 其他 primitive 之前启动；提供 robonix/system/soma/{get_ymal,
-  # get_urdf} 两个 cap，给 pilot/scene/nav2 等消费者读 URDF 与 soma
-  # body description。
+  # 本体描述服务（robonix v0.2 起新增，PR #91 引入）。提供 atlas 上
+  # 两条 gRPC cap：robonix/system/soma/{get_yaml, get_urdf}，给
+  # pilot/scene/nav2 等消费者读 URDF 与 soma body description。
   #
   # 设计：docs/Robonix 开发文档.md §五
   # 接入计划：docs/ranger_mini_soma_integration_plan.md
   # 部署 cheatsheet：./SOMA_DEPLOY.md
   #
-  # 注意：rbnx boot 解析 `system.<key>:` 到
-  # $ROBONIX_SOURCE_PATH/system/<key>/ 包；需要部署机的 robonix
-  # 源码已经包含 system/soma/ 目录（PR #91 引入）。如果部署机上的
-  # rbnx 还不认识这个 key（例如 PR91 dispatcher 尚未合主），
-  # 注释掉本段并改用 SOMA_DEPLOY.md §2.5 的方案 2 手工启 soma。
+  # ─── PR91 启动事实（按源码核对） ───────────────────────────────────
+  # PR91 把 soma 列入 rbnx 的 SYSTEM_BUILTINS（和 atlas / executor /
+  # pilot / liaison 同列），具体证据：
+  #   tools/rbnx/src/cmd/deploy.rs:593-599  (bin_map 多了
+  #                                          ("soma","robonix-soma"))
+  #   tools/rbnx/src/cmd/deploy.rs:690-694  (builtin_names 列表多了 soma)
+  #   tools/rbnx/src/cmd/clean.rs:155-159  (SYSTEM_BUILTINS 同步)
+  #
+  # rbnx boot 把本段翻译成 CLI flag **直接 fork** `robonix-soma`
+  # （走 spawn_system_binary→Command::new(bin)，line 328-340），而**不是**
+  # 走非 builtin system 包的 `rbnx start -p ... + Driver(CMD_INIT,
+  # config_json)` 那条路径。翻译规则在 deploy.rs:1156-1178 的
+  # `"soma" =>` 分支：本段每个字段对应一个 CLI flag。
+  #
+  # ─── soma 启动后做的事 ─────────────────────────────────────────────
+  # 1) 自己向 atlas 注册 get_yaml / get_urdf 两个 cap
+  #    （system/soma/src/main.rs:62-92），transport=Grpc。
+  # 2) 起一个 PackageSupervisor，按 soma_config.local.yaml 的
+  #    deployments[] 调 PackageLauncher 二次 fork `rbnx start -p
+  #    <deployment-pkg>`。本部署里 start_packages=false，这一步不会真
+  #    fork——manifest 里 primitive/service/skill 仍然由 rbnx boot
+  #    直接起，避免与 soma 抢着 spawn。
+  #
+  # 部署机上必须已 `make install` 整套源码（不能单独 cargo install
+  # robonix-soma），原因见 SOMA_DEPLOY.md §2.1。
   soma:
     listen: 127.0.0.1:50091
     log: info
     provider_id: soma
     default_robot: ranger_mini_01
-    # 把所有 deployment / start_packages / robonix_root 配置都放
-    # 到 soma_config.local.yaml 里走 --config 加载，避开两个 PR91 bug：
+    # 把 deployments / robonix_root / start_packages 等放进
+    # soma_config.local.yaml 走 --config 加载，便于本地手工调试时
+    # 复用同一份配置。
     #
-    # Bug 1：rbnx system_cli_args 会把 manifest 的 `start_packages: false`
-    #        翻译成 CLI `--start-packages false`，但 PR91 soma 的
-    #        `--start-packages` 是 flag（无值），导致 soma 启动报
-    #        `unexpected argument 'false'`.
-    #
-    # Bug 2：PR91 system/soma/src/config.rs::normalize_path 会把
-    #        Component::CurDir 整段丢弃，导致 `robonix_root: .` +
-    #        `deployments: [.]` 在 normalize 后变成空 PathBuf。
-    #        soma_config.local.yaml 里都用绝对路径绕开。
-    #
-    # ⚠️ --config 走 soma 进程的 cwd 解析。rbnx boot 的 cwd 是你执行
-    # `rbnx boot` 时的 shell cwd（通常就是 deploy 目录）。为可靠起见
-    # 直接用绝对路径，不要写 ./。
+    # ⚠️ rbnx boot 启动 robonix-soma 时不会强制 chdir，soma 进程会
+    # 继承 rbnx boot 的 cwd（一般就是 ranger_mini_deploy/）；
+    # --config 参数若写相对路径就按这个 cwd 解析。为防止有人改 boot
+    # 起点位置导致解析失败，**坚持用绝对路径**。
     config: /home/syswonder/lhw/ranger_mini_deploy/soma_config.local.yaml
 
   # Non-builtin system services. rbnx boot resolves these by name to
@@ -374,28 +385,41 @@ skill:
     branch: main
     config: {}
 
-  # soma_bridge_rbnx — temporary gRPC→MCP bridge for Soma.
+  # soma_bridge_rbnx — temporary gRPC→MCP transport adapter for Soma.
   #
-  # PR91 ships robonix-soma with two ATLAS caps registered as gRPC:
-  #   robonix/system/soma/get_yaml  (grpc)
-  #   robonix/system/soma/get_urdf  (grpc)
-  # but pilot's MCP-tool discovery only sees transport=mcp caps. So
-  # the LLM cannot reach Soma directly. This skill is a thin forwarder
-  # that exposes two MCP caps with byte-equivalent shapes and forwards
-  # each call into the upstream Soma gRPC RPC. Pilot's discovery picks
-  # the MCP caps up, the LLM can call them, the data round-trips
-  # through real Soma.
+  # ─── 为什么还需要这个 bridge（按 PR91 源码核对） ────────────────────
+  # robonix-soma 启动后会自己向 atlas 注册两条 cap（main.rs:62-92）：
+  #   robonix/system/soma/get_yaml  (Transport::Grpc, field: yaml_text)
+  #   robonix/system/soma/get_urdf  (Transport::Grpc, field: urdf_xml)
+  # 但 pilot 的 LLM 工具发现循环
+  # （system/pilot/src/discovery.rs:74-90, `discover()`）写死了
+  # `query_capabilities("", "", Transport::Mcp)`，对 `cap.transport
+  # != Mcp` 的项直接 `continue` 丢掉。也就是说：
+  #   * soma 在 atlas 上是可见的，`rbnx caps | grep soma` 能看到。
+  #   * pilot 的 LLM 看不到，无法生成调 soma 的工具调用。
   #
-  # Remove this entry the moment upstream pilot grows native Soma
-  # awareness (renders soma.yaml into the system prompt, or
-  # advertises soma over mcp itself).
+  # 本 skill 是一个轻量转发器：用 fastmcp 启一个 MCP server，把
+  #   robonix/skill/soma_bridge/get_yaml   (Transport::Mcp)
+  #   robonix/skill/soma_bridge/get_urdf   (Transport::Mcp)
+  # 注册到 atlas；每个 MCP handler 内部以 gRPC 客户端身份调
+  # robonix-soma 的同名 RPC，把字段原样回传。pilot 的发现循环
+  # 这下能看见，LLM 就能问 "你的 description 段告诉我"。
   #
-  # Dependency: needs system.soma ACTIVE before it can activate. boot
-  # order is: atlas → soma → primitives/services → skills (lazy), so
-  # by the time pilot triggers CMD_ACTIVATE on this skill, soma is
-  # already up.
+  # ─── 什么时候可以删 ─────────────────────────────────────────────
+  # 上游 pilot 任一种修复落地就可以删：
+  #   (a) discovery.rs 改成读所有 transport（或专门加 grpc 分支），
+  #       自带 grpc→llm-tool 适配；或
+  #   (b) pilot 直接把 soma.yaml 渲进 system prompt（计划里说过的方案）。
+  # 任意一种 PR 合并后，把本段从 manifest 删掉即可，bridge 自身无状态。
   #
-  # Config: none. The bridge is a pure transport adapter, no knobs.
+  # ─── 依赖与启动顺序 ────────────────────────────────────────────
+  # 需要 system.soma 已 ACTIVE 才能完成 CMD_ACTIVATE（首次 MCP 调用时
+  # 触发，resolve soma 的两个 gRPC endpoint 并打开 long-lived channel）。
+  # rbnx boot 顺序：atlas → executor → pilot → liaison → soma → 非
+  # builtin system → primitive → service → skill(lazy)，等 pilot 触发
+  # 本 skill 的 CMD_ACTIVATE 时 soma 早已就绪。
+  #
+  # Config: none. 纯 transport 适配，无可调旋钮。
   - name: soma_bridge
     url: https://github.com/lhw2002426/soma_bridge_rbnx
     branch: main

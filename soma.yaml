@@ -1,12 +1,12 @@
 # Soma body description for the Ranger Mini deploy.
 #
 # Loaded by `robonix-soma` (PR91) and exposed verbatim through
-# `robonix/system/soma/get_ymal`. Future srvs (description / footprint /
+# `robonix/system/soma/get_yaml`. Future srvs (description / footprint /
 # sensor_extrinsics — see PR91 capabilities/system/soma/*.v1.toml)
 # will parse the structured fields below.
 #
 # v0.1 stage: PR91's loader only checks `robot.id` and `urdf.path`.
-# Everything else is forward-looking — preserved verbatim in get_ymal
+# Everything else is forward-looking — preserved verbatim in get_yaml
 # responses so consumers can start mining it the moment downstream
 # srvs ship.
 #

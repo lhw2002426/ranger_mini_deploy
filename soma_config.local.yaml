@@ -1,36 +1,47 @@
 # robonix-soma process config.
 #
-# 注：在 rbnx boot 启动 soma 时 **不会**用这个文件——manifest 里的
-# system.soma 块通过 CLI 直接给 soma 传 --deployment / --robonix-root，
-# 已经完整覆盖 soma 启动所需。
+# 用途：
+#   1) rbnx boot 启动 soma 时把 manifest `system.soma.config:` 翻译成
+#      `robonix-soma --config <abs path>` 加载本文件。manifest 里写明的
+#      listen / provider_id / default_robot / atlas / log 仍由 rbnx 以
+#      CLI flag 形式叠加传给同一进程（翻译规则见
+#      tools/rbnx/src/cmd/deploy.rs:1156-1178 `"soma" =>` 分支），CLI
+#      优先级高于本文件，遇冲突以 manifest 为准。
+#   2) 手工调试时也可以直接 `robonix-soma --config /home/syswonder/lhw/\
+#      ranger_mini_deploy/soma_config.local.yaml` 复用这同一份配置。
 #
-# 本文件仅供 SOMA_DEPLOY.md §2.5 的方案 2 手工启动 soma 时使用：
-#     robonix-soma --config /home/syswonder/lhw/ranger_mini_deploy/soma_config.local.yaml
-#
-# 路径必须为绝对路径——PR91 的 system/soma/src/config.rs::normalize_path
-# 会把 Component::CurDir（即纯 "."）整段丢弃，使得 `robonix_root: .` +
-# `deployments: [.]` 在 normalize 后变成空 PathBuf，soma 启动时报
-# "no Soma YAML file found in ''". 改用绝对路径可彻底绕开。
+# 路径推荐用**绝对路径**。原因：rbnx boot 的 spawn_system_binary
+# （tools/rbnx/src/cmd/deploy.rs:328-340）通过 `Command::new(bin)`
+# 直接 fork robonix-soma，**不会** chdir，soma 进程继承的就是 rbnx
+# boot 的 cwd（一般是 ranger_mini_deploy/，但运维若从别处发起 boot 会
+# 改变）。绝对路径可避免因 boot 起点切换导致的解析歧义。
 #
 # References:
 #   - integration plan: ../docs/ranger_mini_soma_integration_plan.md
 #   - PR91 README:      <robonix>/system/soma/README.md
+#   - PR91 校核报告:    ../docs/ranger_mini_deploy_pr91_soma_check.md
 
 atlas_endpoint: 127.0.0.1:50051
 listen:        127.0.0.1:50091
 provider_id:   soma
 
-# 绝对路径——见上方对 normalize_path 的说明。
+# 绝对路径——见上方说明。
 robonix_root: /home/syswonder/lhw/ranger_mini_deploy
 deployments:
   - /home/syswonder/lhw/ranger_mini_deploy
 
-# Single-robot deploy → empty robot_id in get_ymal/get_urdf requests
+# Single-robot deploy → empty robot_id in get_yaml/get_urdf requests
 # resolves to this id automatically.
 default_robot: ranger_mini_01
 
-# Stage A: do NOT let soma fork `rbnx start` for primitive/skill
-# packages. rbnx boot keeps owning that. Avoids double-spawn races and
-# keeps the existing manifest semantics intact.
+# soma 启动后会按 `deployments[]` 起 PackageSupervisor + PackageLauncher，
+# 二次 fork `rbnx start -p <deployment-pkg>` 来托管 deployment 下的包。
+# 本部署把该开关关掉，让 primitive/service/skill 仍由 rbnx boot 自己
+# 起，避免与 soma 抢着 spawn（详见 system/soma/src/main.rs:42-48 +
+# supervisor.rs::start_from_deployments 的判断逻辑）。
+#
+# 注意：关掉这个开关不会影响 soma 向 atlas 注册 get_yaml/get_urdf 两条
+# grpc cap（那是另一条独立路径，main.rs:62-92），所以 SOMA_DEPLOY.md 的
+# 验收步骤仍然完整可走。
 start_packages: false
 rbnx_bin:      rbnx
