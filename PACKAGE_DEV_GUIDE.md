@@ -227,6 +227,19 @@ capabilities:
 
 **关键点**：声明 `*/driver` 触发 `Driver(CMD_INIT)` 握手 — rbnx boot 会把 manifest 里的 `config:` 块作为 `config_json` 通过这个 RPC 传给你。这是把部署期可调参数传进来的**唯一途径**（deploy.rs 不把 config 写文件、不注入环境变量）。
 
+### Build 产物归属：包自己管，别指望框架
+
+> ⚠️ **必读** — 自 rbnx-cli 取消"自动 source build 产物"以来，build 产物的**位置**和**生命周期**完全由包自己负责。framework 不再 prepend `source <pkg>/rbnx-build/ws/install/setup.bash; ...; bash this` 之类的 wrapper，进程入口就是裸调用 `scripts/start.sh`。
+>
+> 这意味着：
+>
+> 1. **build.sh 输出路径**：放哪里都行，但**约定俗成放在 `$PKG/rbnx-build/`** 下（既能被 `RBNX_BUILD_CLEAN=1` 一键清掉，又不会污染 git 工作目录 — 各包的 `.gitignore` 通常排除了 `rbnx-build/`）。codegen 产物通常去 `rbnx-build/codegen/`，colcon 产物去 `rbnx-build/ws/`。
+> 2. **start.sh 必须自己 source 所有 build 产物**。包括：
+>    - `/opt/ros/$ROS_DISTRO/setup.bash` — 基础 ROS 2 distro
+>    - `$PKG/rbnx-build/ws/install/setup.bash` — colcon overlay（如果你跑了 colcon build）
+>    - `$PKG/rbnx-build/codegen/proto_gen` / `robonix_mcp_types` — 加到 `PYTHONPATH`（codegen 产物）
+> 3. **遇缺 fatal，别静默跳过**：build.sh 没跑过的话 start.sh 应该 `exit 2` 并打印怎么补救（`Run \`bash scripts/build.sh\` first.`），而不是 `if [[ -f ... ]]; then source; fi`。后者的失败模式是"start 启动看似成功但运行时找不到 ROS 包"，定位很痛苦。
+
 ### `scripts/build.sh`（典型形态）
 
 ```bash
@@ -238,13 +251,25 @@ CLEAN="${RBNX_BUILD_CLEAN:-}"
 [[ "$CLEAN" == "1" ]] && rm -rf rbnx-build
 mkdir -p rbnx-build/data
 
+# === codegen（atlas_pb2 / lifecycle / MCP types） ===
 FLAGS=(--out-dir "$PKG/rbnx-build/codegen")
 [[ "$CLEAN" == "1" ]] && FLAGS+=(--clean)
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
-# ↓ 如果你 vendor 了 ROS 源码（src/livox_ros_driver2、src/realsense-ros 之类），
-#   在这里跑 colcon build；否则跳过。
-# colcon build --packages-select foo --cmake-args -DCMAKE_BUILD_TYPE=Release
+# === colcon（仅当你 vendor 了 ROS 源码） ===
+# 推荐输出位置：$PKG/rbnx-build/ws/install/
+# start.sh 之后会 source 这个 setup.bash。
+#
+# mkdir -p rbnx-build/ws/src
+# ln -snf "$PKG/src/<vendored_ros_pkg>" "$PKG/rbnx-build/ws/src/<vendored_ros_pkg>"
+# ROS_DISTRO="${ROS_DISTRO:-humble}"
+# set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
+# cd "$PKG/rbnx-build/ws"
+# colcon build --symlink-install \
+#     --packages-select <vendored_ros_pkg_names...> \
+#     --event-handlers console_direct+ \
+#     --cmake-args -DCMAKE_BUILD_TYPE=Release
+# cd "$PKG"
 
 touch "$PKG/rbnx-build/.rbnx-built"
 ```
@@ -257,15 +282,34 @@ set -euo pipefail
 PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PKG"
 
+# 1. ROS 基础 distro。
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 set +u; source "/opt/ros/${ROS_DISTRO}/setup.bash"; set -u
-# 如果有 vendor 的 ROS workspace overlay：
-# [[ -f "$PKG/install/setup.bash" ]] && { set +u; source install/setup.bash; set -u; }
 
+# 2. 自己的 colcon overlay（如果 build.sh 跑了 colcon）。
+#    rbnx-cli 不会代为 source —— 包必须自己来。
+#    缺失就 fatal exit，别静默跳过。
+if [[ -f "$PKG/rbnx-build/ws/install/setup.bash" ]]; then
+    set +u; source "$PKG/rbnx-build/ws/install/setup.bash"; set -u
+else
+    # 如果你的包不 build colcon（只 codegen），删掉这个 else 分支。
+    echo "[my_primitive/start] ERR: colcon overlay missing at $PKG/rbnx-build/ws/install/" >&2
+    echo "[my_primitive/start]      Run \`bash scripts/build.sh\` first." >&2
+    exit 2
+fi
+
+# 3. robonix_api（在 robonix 源码树里，rbnx CLI 知道路径）。
 if ROBONIX_API="$(rbnx path robonix-api 2>/dev/null)"; then
     export PYTHONPATH="$ROBONIX_API:$PKG:${PYTHONPATH:-}"
 fi
-export PYTHONPATH="$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:$PYTHONPATH"
+
+# 4. codegen 产物（atlas stubs + 可选 MCP types）。
+CODEGEN="$PKG/rbnx-build/codegen"
+if [[ ! -d "$CODEGEN/proto_gen" ]]; then
+    echo "[my_primitive/start] ERR: codegen missing at $CODEGEN — run scripts/build.sh first." >&2
+    exit 2
+fi
+export PYTHONPATH="$CODEGEN/proto_gen:$CODEGEN/robonix_mcp_types:$PYTHONPATH"
 
 exec python3 -m my_primitive.main
 ```

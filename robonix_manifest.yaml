@@ -13,12 +13,21 @@ name: robonix-ranger-mini-deploy
 # calls Driver(CMD_INIT, config_json) on its */driver gRPC interface.
 #
 # ─── Boot ordering: STRICTLY SERIAL, declaration order ─────────────────
-# rbnx boot v0.1.x launches packages STRICTLY in the YAML declaration
-# order: every primitive[i] must reach Driver(CMD_INIT) ok=true before
-# primitive[i+1] is spawned; same for service[] and skill[]. There is
-# NO "deferred" retry mechanism — Driver returning ok=false aborts the
-# whole boot (see rust/crates/robonix-cli/src/cmd/deploy.rs near the
-# `if !r.ok { bail }` line). So:
+# 自 2026-06 两阶段 bring-up 重构起（docs/soma_two_stage_bringup.md），
+# 各段的实际启动方分工是：
+#   * builtin（atlas / executor / pilot / liaison / soma / ...）  → rbnx
+#   * primitive                                                   → soma stage 1
+#   * service                                                     → rbnx
+#   * skill（INIT only，ACTIVATE 推迟到 executor 首次调用 MCP）   → soma stage 2
+#
+# 但**段内顺序**仍然是 STRICTLY SERIAL，依赖声明顺序：
+#   * primitive[i] 必须 CMD_INIT ok=true 才会 spawn primitive[i+1]
+#     （soma launcher.rs run_stage，stage 内一个一个 bring_up_one）；
+#   * service[i] 同理（rbnx deploy.rs）；
+#   * skill[i] 同理（soma stage 2 一个一个走 spawn + CMD_INIT）。
+# 没有 "deferred" retry —— Driver 返回 ok=false 就 fail 当前 entry，
+# soma 把对应 pgid SIGKILL 后继续下一个（不再抛全 boot fatal）。
+# rbnx 这边 service 段仍然保持原来的 ok=false → bail。所以：
 #   1) put providers BEFORE consumers (lidar before imu-shim that reads
 #      /livox/imu; mapping before nav2; etc.);
 #   2) packages without a `*/driver` interface skip CMD_INIT entirely
@@ -87,36 +96,52 @@ system:
     log: info
 
   # ── soma ────────────────────────────────────────────────────────────
-  # 本体描述服务（robonix v0.2 起新增，PR #91 引入）。提供 atlas 上
-  # 两条 gRPC cap：robonix/system/soma/{get_yaml, get_urdf}，给
-  # pilot/scene/nav2 等消费者读 URDF 与 soma body description。
+  # 本体描述 + primitive/skill 编排服务（PR #91 引入，2026-06 两阶段
+  # bring-up 重构后正式上线，见 docs/soma_two_stage_bringup.md）。
   #
-  # 设计：docs/Robonix 开发文档.md §五
-  # 接入计划：docs/ranger_mini_soma_integration_plan.md
-  # 部署 cheatsheet：./SOMA_DEPLOY.md
+  # 提供 atlas 上两条 gRPC cap：
+  #   robonix/system/soma/get_yaml   — 读 soma.yaml 的 body description
+  #   robonix/system/soma/get_urdf   — 读 URDF（XML）
+  # 给 pilot/scene/nav2 等消费者用。
   #
-  # ─── PR91 启动事实（按源码核对） ───────────────────────────────────
-  # PR91 把 soma 列入 rbnx 的 SYSTEM_BUILTINS（和 atlas / executor /
-  # pilot / liaison 同列），具体证据：
-  #   tools/rbnx/src/cmd/deploy.rs:593-599  (bin_map 多了
-  #                                          ("soma","robonix-soma"))
-  #   tools/rbnx/src/cmd/deploy.rs:690-694  (builtin_names 列表多了 soma)
-  #   tools/rbnx/src/cmd/clean.rs:155-159  (SYSTEM_BUILTINS 同步)
+  # 设计：       docs/Robonix 开发文档.md §五
+  # 两阶段说明： ../docs/soma_two_stage_bringup.md
+  # 接入计划：   ../docs/ranger_mini_soma_integration_plan.md
+  # 部署 cheatsheet： ./SOMA_DEPLOY.md
   #
-  # rbnx boot 把本段翻译成 CLI flag **直接 fork** `robonix-soma`
-  # （走 spawn_system_binary→Command::new(bin)，line 328-340），而**不是**
+  # ─── soma 在 rbnx 启动链中的位置（按当前 robonix 源码核对） ─────────
+  # soma 是 rbnx 的 SYSTEM_BUILTIN（和 atlas / executor / pilot /
+  # liaison 同列）。rbnx boot 把本段翻译成 CLI flag **直接 fork**
+  # `robonix-soma`（spawn_system_binary → Command::new(bin)），而不是
   # 走非 builtin system 包的 `rbnx start -p ... + Driver(CMD_INIT,
-  # config_json)` 那条路径。翻译规则在 deploy.rs:1156-1178 的
-  # `"soma" =>` 分支：本段每个字段对应一个 CLI flag。
+  # config_json)` 那条路径。
+  # 翻译规则在 deploy.rs 的 `"soma" =>` 分支：支持的 CLI flag 是
+  #   --listen / --atlas / --provider-id / --default-robot / --config /
+  #   --rbnx-bin / --log / --deployment（数组，每条 path 翻一个 flag）/
+  #   --start-packages（2026-06 新增，对应 config.start_packages，默认 true）
   #
-  # ─── soma 启动后做的事 ─────────────────────────────────────────────
-  # 1) 自己向 atlas 注册 get_yaml / get_urdf 两个 cap
-  #    （system/soma/src/main.rs:62-92），transport=Grpc。
-  # 2) 起一个 PackageSupervisor，按 soma_config.local.yaml 的
-  #    deployments[] 调 PackageLauncher 二次 fork `rbnx start -p
-  #    <deployment-pkg>`。本部署里 start_packages=false，这一步不会真
-  #    fork——manifest 里 primitive/service/skill 仍然由 rbnx boot
-  #    直接起，避免与 soma 抢着 spawn。
+  # ─── soma 启动后做的事（两阶段 bring-up，v2 模型） ─────────────────
+  # stage 1（soma 进程启动初期）：
+  #   1) 解析 `deployments:` 收集所有 primitive + skill 段的包（service
+  #      段被显式 skip，由 rbnx 直接起，见 deployment.rs）。
+  #   2) 对 primitive 段：spawn `rbnx start -p <pkg> --endpoint <atlas>`
+  #      → 等 atlas 注册 → CMD_INIT → CMD_ACTIVATE。
+  #   3) 完成后才向 atlas 注册自身的 get_yaml / get_urdf 两个 gRPC cap
+  #      并 ACTIVE。
+  #   4) 开 `atlas.WatchProvider("soma")` server-stream，挂起等 rbnx
+  #      发 stage 2 trigger。
+  # stage 2（rbnx 起完 service: 段后发 `NotifyProvider("soma",
+  # stage_trigger("stage2"))` 触发）：
+  #   1) 对 skill 段：spawn → CMD_INIT，**不** ACTIVATE。
+  #   2) skill 留在 INACTIVE，由 executor 在 MCP 工具被首次调用时
+  #      （ensure_skill_runnable）再发 CMD_ACTIVATE。
+  #
+  # 也就是说：**rbnx boot 已经不再起 primitive / skill 段**，那两段
+  # 循环 2026-06 已经从 deploy.rs 删除（注释留在原位写
+  # "handled by soma's stage 1/2"）。只要本 manifest 里有 primitive
+  # 或 skill，就**必须**起 soma；否则机器人不会动。rbnx 内部会在
+  # 检测到 primitive/skill 非空但缺 system.soma 时自动注入默认 soma
+  # 块（ensure_soma_defaults），所以这里即使整段写得很简，也能跑。
   #
   # 部署机上必须已 `make install` 整套源码（不能单独 cargo install
   # robonix-soma），原因见 SOMA_DEPLOY.md §2.1。
@@ -126,8 +151,9 @@ system:
     provider_id: soma
     default_robot: ranger_mini_01
     # 把 deployments / robonix_root / start_packages 等放进
-    # soma_config.local.yaml 走 --config 加载，便于本地手工调试时
-    # 复用同一份配置。
+    # soma_config.local.yaml 走 --config 加载，便于本地手工
+    # `robonix-soma --config <this>` 调试时复用同一份配置。
+    # 本部署明确显式开启 start_packages=true（即两阶段 bring-up）。
     #
     # ⚠️ rbnx boot 启动 robonix-soma 时不会强制 chdir，soma 进程会
     # 继承 rbnx boot 的 cwd（一般就是 ranger_mini_deploy/）；
@@ -387,8 +413,8 @@ skill:
 
   # soma_bridge_rbnx — temporary gRPC→MCP transport adapter for Soma.
   #
-  # ─── 为什么还需要这个 bridge（按 PR91 源码核对） ────────────────────
-  # robonix-soma 启动后会自己向 atlas 注册两条 cap（main.rs:62-92）：
+  # ─── 为什么还需要这个 bridge（按当前源码核对） ────────────────────
+  # robonix-soma 启动后会自己向 atlas 注册两条 cap（main.rs:67-98）：
   #   robonix/system/soma/get_yaml  (Transport::Grpc, field: yaml_text)
   #   robonix/system/soma/get_urdf  (Transport::Grpc, field: urdf_xml)
   # 但 pilot 的 LLM 工具发现循环

@@ -12,46 +12,75 @@
 - [x] PR91 已合入部署机上的 robonix 源码（即 `system/soma/`、`capabilities/system/soma/`、`tools/rbnx/.../deploy.rs` 里的 soma builtin 分支都已就位）
 - [ ] 当前线上栈正常（避免接入 Soma 时撞坏在跑的任务）
 
-## 0.5 启动机制速览（PR91 源码事实）
+## 0.5 启动机制速览（当前源码事实，已对齐 2026-06 robonix HEAD）
 
-> 这一节是新加的：让接手的人**别再去删 `soma_bridge` 这个 skill**。
+> 这一节是新加的：让接手的人**别再去删 `soma_bridge` 这个 skill**，
+> 同时**别误以为 soma 会代管 service 段**——不会。
 
 ```
 rbnx boot
-  ├─ system builtin 阶段（rbnx 直接 fork，按 bin_map 顺序）
+  ├─ system builtin 阶段（rbnx 直接 fork，按 bin_map 顺序，每个间隔 1.5s）
   │   atlas → executor → pilot → liaison → soma
   │     ↑
-  │     bin_map 见 tools/rbnx/src/cmd/deploy.rs:593-599
-  │     soma 在 PR91 已加入；CLI flag 翻译规则在 :1156-1178
+  │     bin_map 见 tools/rbnx/src/cmd/deploy.rs:708-714
+  │     "soma" => CLI flag 翻译规则在 :1333-1355
+  │     spawn 实现在 spawn_system_binary :335-394（Command::new(bin)，
+  │                                              不 chdir）
   │
-  ├─ 非 builtin system 阶段（走 rbnx start -p + Driver(CMD_INIT)）
+  ├─ 非 builtin system 阶段（走 spawn_and_init = rbnx start -p +
+  │                          Driver(CMD_INIT)）
   │   memory / scene
+  │   见 deploy.rs:805-859；builtin_names 列表（:806）把上面 5 个跳过
   │
-  ├─ primitive / service 阶段（走 rbnx start -p + Driver(CMD_INIT)）
+  ├─ primitive 阶段（同样走 spawn_and_init）
   │   ranger_description → mid360_lidar → mid360_imu → realsense_camera
-  │   → ranger_chassis → mapping → nav2
+  │   → ranger_chassis
+  │   见 deploy.rs:861-890
+  │
+  ├─ service 阶段（同样走 spawn_and_init）
+  │   mapping → nav2
+  │   见 deploy.rs:891-919
   │
   └─ skill 阶段（lazy-activate）
       explore / soma_bridge      ← INACTIVE 直到 pilot 第一次 MCP 调用
 ```
 
-`rbnx boot` 把 `system.soma:` 翻译成 `robonix-soma --listen ... --atlas
-... --config ... --provider-id ... --default-robot ... --log ...` 直接
-fork（`spawn_system_binary` 走 `Command::new(bin)`，**不会** chdir，
-所以 `--config` 用绝对路径最稳）。
+`rbnx boot` 把 `system.soma:` 翻译成
+
+```
+robonix-soma --listen ... --atlas ... --provider-id ... --default-robot ... \
+             --config ... --rbnx-bin ... --log ... \
+             [--deployment <path>]*
+```
+
+直接 fork。`spawn_system_binary` 用 `Command::new(bin)` 起进程，**不 chdir**，
+所以 `--config` 用绝对路径最稳；`--deployment` 是新加的：若 manifest 里
+`system.soma.deployments:` 写了路径数组，每条会翻一个 `--deployment` flag
+（deploy.rs:1345-1354）。本部署目前**没**用这个 flag，deployments 仍由
+`soma_config.local.yaml` 提供。
 
 **soma 起来后做两件事**：
 
-1. 自己向 atlas 注册两条 cap（`system/soma/src/main.rs:62-92`）：
+1. 自己向 atlas 注册两条 cap（`system/soma/src/main.rs:67-98`）：
    ```
    robonix/system/soma/get_yaml   Transport::Grpc, port 50091
    robonix/system/soma/get_urdf   Transport::Grpc, port 50091
    ```
-2. 起 `PackageSupervisor` 调 `PackageLauncher` 二次 fork
-   `rbnx start -p <deployment-pkg>` —— 但我们在
-   `soma_config.local.yaml` 里把 `start_packages: false` 关掉了，
-   所以这一步**实际不 fork**，包仍由 rbnx boot 自己起，避免与
-   soma 抢着 spawn。
+2. 构造 `PackageLauncher`（`main.rs:40-47`），调
+   ```rust
+   launcher.start_from_deployments(&deployments, config.start_packages)
+   ```
+   （`main.rs:48-50`，实现在 `launcher.rs:37-105`）。该方法按
+   `DeploymentStore` 给出的目标列表（`deployment.rs:81-118`）逐个
+   fork `rbnx start -p <pkg> --endpoint <atlas>`，**但只接管
+   `primitive` + `skill` 两类**：
+     * `service:` 段在 `deployment.rs:105-111` 被显式 skip，理由
+       hard-code 为 `"Soma v2 only starts primitive and skill packages"`。
+     * 没有 `path:` 字段（即 url-only / 未本地化）的条目也 skip。
+   而 `start_packages: false` 时 launcher.rs:51-52 直接短路成
+   `StartupStatus::StartDisabled`，**整条 fork 路径都不会跑**。
+   本部署正是这种姿态：primitive / service / skill 仍由 rbnx boot 自己
+   起，避免与 soma 抢着 spawn 同一批包。
 
 ### 为什么还要保留 `skill.soma_bridge`
 
@@ -72,6 +101,28 @@ fastmcp server，把那两条 cap 用 `Transport::Mcp` 重新登记一份，hand
 * (b) pilot 直接把 `soma.yaml` 渲进 system prompt（计划里说过的方案）。
 
 任一种合并后，把 manifest 里 `- name: soma_bridge` 整段删掉即可。
+
+### 为什么 `start_packages` 一定保持 `false`
+
+很容易有人想"既然 soma 能托管 primitive/skill，那就让它接管啊"——
+**不行**，原因有两条：
+
+1. **rbnx boot 和 soma 是两条独立的 spawn 通路，都跑就会双重 fork。**
+   rbnx boot 起完 system builtin 之后会照常进入 primitive/service/skill
+   阶段（`deploy.rs:861-919`）。如果同时 soma 那边 `start_packages: true`，
+   `launcher.rs:62-92` 也会拿着同一批 primitive + skill 包再调
+   `rbnx start -p <pkg> --endpoint <atlas>` fork 一遍——两份进程抢同
+   一个 cap_id 注册、抢同一个 ROS topic 发布权，行为不可预期。
+2. **soma 不接管 `service` 段（mapping / nav2 就在这一段）。**
+   `deployment.rs:105-111` 显式 skip 所有 `service:` entry，理由
+   hard-code 为 `"Soma v2 only starts primitive and skill packages"`。
+   也就是说，即便切换到"由 soma 托管"，rbnx boot 仍必须独立起
+   mapping/nav2——保留两条 spawn 通路就等于回到上面的双重 fork 状态。
+
+要换到 soma 托管 primitive + skill，需要先在 rbnx 一侧加一个
+`skip_user_packages` / `--skip-packages` 开关，让 boot 起完 system builtin
+就停手，再让 soma 接续。当前 rbnx 没有这个开关（搜不到任何相关
+flag），所以**当前唯一一致的选择是 `start_packages: false`**。
 
 ## 1. 本机已经为你准备好的文件
 
@@ -159,10 +210,14 @@ robonix-soma \
 ```
 
 并直接 fork，无需另开终端。翻译规则在
-`tools/rbnx/src/cmd/deploy.rs:1156-1178` 的 `"soma" =>` 分支；启动方式
-是 `spawn_system_binary` 走的 `Command::new(bin)`（line 328-340），不
+`tools/rbnx/src/cmd/deploy.rs:1333-1355` 的 `"soma" =>` 分支；启动方式
+是 `spawn_system_binary`（`:335-394`）走的 `Command::new(bin)`，**不**
 经过 `Driver(CMD_INIT, config_json)`，所以 manifest 里 `system.soma:`
-下的每个字段都必须对应一个支持的 CLI flag。
+下的每个字段都必须对应一个支持的 CLI flag。当前支持的 flag：
+`--listen / --atlas / --provider-id / --default-robot / --config /
+--rbnx-bin / --log / --deployment`（最后一项可重复，对应 yaml 里
+`deployments:` 数组）；**没有** `--start-packages`，那个开关只能从
+`--config` 加载的文件读。
 
 另开 ssh 跑验收命令：
 
