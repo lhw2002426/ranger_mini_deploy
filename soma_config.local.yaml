@@ -1,15 +1,42 @@
-# Optional robonix-soma config for manual debugging.
-# Normal `rbnx boot` reads the Soma deployment settings from
-# robonix_manifest.yaml: system.soma, not from this file.
+# robonix-soma process config.
+#
+# Loaded by `robonix-soma --config <abs path>`. rbnx boot derives that
+# --config flag from manifest `system.soma.config:` (see deploy.rs
+# `"soma" =>` translation branch). Other flags coming from the manifest
+# (listen / provider_id / default_robot / atlas / log / --start-packages)
+# are passed as additional CLI args and override values in this file.
+#
+# Field precedence in SomaConfig::resolve (system/soma/src/config.rs):
+#   CLI  >  env  >  config_json  >  this file  >  built-in default
+#
+# Paths MUST be absolute: rbnx spawn_system_binary does not chdir before
+# forking robonix-soma, so the cwd it inherits is wherever `rbnx boot`
+# was invoked — not necessarily this directory.
+#
+# References:
+#   - two-stage bring-up: ../docs/soma_two_stage_bringup.md
+#   - integration plan:   ../docs/ranger_mini_soma_integration_plan.md
+#   - PR91 README:        <robonix>/system/soma/README.md
 
 atlas_endpoint: 127.0.0.1:50051
-listen: 127.0.0.1:50091
-provider_id: soma
-default_robot: ranger_mini_01
+listen:        127.0.0.1:50091
+provider_id:   soma
 
 robonix_root: /home/syswonder/lhw/ranger_mini_deploy
 deployments:
   - /home/syswonder/lhw/ranger_mini_deploy
 
+# Single-robot deploy: empty robot_id in get_yaml/get_urdf resolves to this.
+default_robot: ranger_mini_01
+
+# start_packages: let soma own primitive + skill spawn & lifecycle.
+#   true  (default, what v2 needs) — soma stage1 spawns+INIT+ACTIVATEs
+#         all primitives, then stage2 (rbnx NotifyProvider trigger)
+#         spawns+INITs all skills (ACTIVATE deferred to executor's
+#         first MCP call). rbnx no longer touches those packages.
+#   false (CI / debug only)         — launcher short-circuits to
+#         StartDisabled; primitive + skill never start. Robot stays
+#         dead because rbnx will NOT pick them up either.
 start_packages: true
+
 rbnx_bin: rbnx
