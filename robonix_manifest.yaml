@@ -150,16 +150,12 @@ system:
     log: info
     provider_id: soma
     default_robot: ranger_mini_01
-    # 把 deployments / robonix_root / start_packages 等放进
-    # soma_config.local.yaml 走 --config 加载，便于本地手工
-    # `robonix-soma --config <this>` 调试时复用同一份配置。
-    # 本部署明确显式开启 start_packages=true（即两阶段 bring-up）。
-    #
-    # ⚠️ rbnx boot 启动 robonix-soma 时不会强制 chdir，soma 进程会
-    # 继承 rbnx boot 的 cwd（一般就是 ranger_mini_deploy/）；
-    # --config 参数若写相对路径就按这个 cwd 解析。为防止有人改 boot
-    # 起点位置导致解析失败，**坚持用绝对路径**。
-    config: /home/syswonder/lhw/ranger_mini_deploy/soma_config.local.yaml
+    # Keep boot-time Soma config in the manifest so a hand-edited
+    # soma_config.local.yaml cannot make robonix-soma exit before it
+    # subscribes to atlas.WatchProvider("soma").
+    deployments:
+      - /home/syswonder/lhw/ranger_mini_deploy
+    start_packages: true
 
   # Non-builtin system services. rbnx boot resolves these by name to
   # `<robonix_source>/system/<key>/`. The robonix tree currently ships

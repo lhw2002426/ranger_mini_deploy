@@ -1,69 +1,15 @@
-# robonix-soma process config.
-#
-# 用途：
-#   1) rbnx boot 启动 soma 时把 manifest `system.soma.config:` 翻译成
-#      `robonix-soma --config <abs path>` 加载本文件。manifest 里写明的
-#      listen / provider_id / default_robot / atlas / log 仍由 rbnx 以
-#      CLI flag 形式叠加传给同一进程（翻译规则见
-#      tools/rbnx/src/cmd/deploy.rs 的 `"soma" =>` 分支）。
-#      在 SomaConfig::resolve（system/soma/src/config.rs）里，
-#      逐字段都是 `CLI > env > config_json > file_cfg > default`，
-#      CLI 优先级最高，遇冲突以 manifest 为准。
-#      `start_packages` 现已支持 --start-packages /
-#      ROBONIX_SOMA_START_PACKAGES / config_json，最后才回落到本文件，
-#      默认 true（见 config.rs `start_packages_defaults_to_true_*` 测试）。
-#   2) 手工调试时也可以直接 `robonix-soma --config /home/syswonder/lhw/\
-#      ranger_mini_deploy/soma_config.local.yaml` 复用这同一份配置。
-#
-# 路径推荐用**绝对路径**。原因：rbnx boot 的 spawn_system_binary
-# 通过 `Command::new(bin)` 直接 fork robonix-soma，**不会** chdir，
-# soma 进程继承的就是 rbnx boot 的 cwd（一般是 ranger_mini_deploy/，
-# 但运维若从别处发起 boot 会改变）。绝对路径可避免因 boot 起点切换
-# 导致的解析歧义。
-#
-# References:
-#   - 两阶段 bring-up 设计:  ../docs/soma_two_stage_bringup.md
-#   - integration plan:       ../docs/ranger_mini_soma_integration_plan.md
-#   - PR91 README:            <robonix>/system/soma/README.md
+# Optional robonix-soma config for manual debugging.
+# Normal `rbnx boot` reads the Soma deployment settings from
+# robonix_manifest.yaml: system.soma, not from this file.
 
 atlas_endpoint: 127.0.0.1:50051
-listen:        127.0.0.1:50091
-provider_id:   soma
+listen: 127.0.0.1:50091
+provider_id: soma
+default_robot: ranger_mini_01
 
-# 绝对路径——见上方说明。
 robonix_root: /home/syswonder/lhw/ranger_mini_deploy
 deployments:
   - /home/syswonder/lhw/ranger_mini_deploy
 
-# Single-robot deploy → empty robot_id in get_yaml/get_urdf requests
-# resolves to this id automatically.
-default_robot: ranger_mini_01
-
-# start_packages：是否让 soma 接管 primitive + skill 的 spawn + lifecycle。
-#
-# 自 2026-06 的两阶段 bring-up 重构起（见
-# ../docs/soma_two_stage_bringup.md），rbnx 已经**不再**起 primitive 和
-# skill 段——deploy.rs 把那两段循环删掉了，注释留在原位写
-# "handled by soma's stage 1/2"。也就是说：
-#
-#   开启时（true，本部署的选择，也是 v2 唯一正确的设置）：
-#     · soma stage 1（进程启动初期）：spawn 所有 primitive → CMD_INIT →
-#       CMD_ACTIVATE；完成后 soma 才向 atlas 注册 get_yaml/get_urdf 并
-#       ACTIVE，再开 atlas.WatchProvider("soma") 等 stage 2。
-#     · soma stage 2（rbnx 起完 service: 段后发 NotifyProvider("soma",
-#       stage_trigger("stage2")) 触发）：spawn 所有 skill → CMD_INIT，
-#       但**不**做 CMD_ACTIVATE——skill 留在 INACTIVE，由 executor 在
-#       MCP 工具被首次调用时再发 CMD_ACTIVATE。
-#
-#   关闭时（false，仅用于 CI/调试）：
-#     · launcher 在 bring_up_one 短路成 StartupStatus::StartDisabled，
-#       primitive + skill 谁都不起。
-#     · 整个机器人不会动——rbnx 不会再补这一刀。仅当你想用 soma 单测
-#       deployments 解析 / yaml / urdf 路径时才有意义。
-#
-# 默认值：在 SomaConfig::resolve 里，所有来源都缺省时回落到 true
-# （config.rs 测试 `start_packages_defaults_to_true_when_no_source_overrides_it`
-# 锁这一行为）。本文件显式写 true 只是为了让本地手工 `robonix-soma
-# --config <this>` 调试时也走完整路径。
 start_packages: true
-rbnx_bin:      rbnx
+rbnx_bin: rbnx
