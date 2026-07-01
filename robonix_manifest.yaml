@@ -40,6 +40,13 @@ env:
   #   VLM_BASE_URL  for cloud-side reasoning (pilot)
   #   VLM_API_KEY
   #   VLM_MODEL
+  #   ROBONIX_DEPLOY_DIR  absolute path of THIS deploy dir; used by
+  #                       system.soma.{robot_yaml,config} below so we
+  #                       don't hardcode any operator's $HOME. Typical
+  #                       incantation on the Jetson:
+  #                         cd /home/syswonder/lhw/ranger_mini_deploy
+  #                         export ROBONIX_DEPLOY_DIR="$(pwd)"
+  #                         rbnx boot ./robonix_manifest.yaml
 
   # ── scene: run native, no docker ─────────────────────────────────────
   # `system/scene` ships with a docker-default start.sh; we want it to
@@ -96,8 +103,9 @@ system:
     log: info
 
   # ── soma ────────────────────────────────────────────────────────────
-  # 本体描述 + primitive/skill 编排服务（PR #91 引入，2026-06 两阶段
-  # bring-up 重构后正式上线，见 docs/soma_two_stage_bringup.md）。
+  # 本体描述 + primitive/skill 编排服务。v2 flat schema（2026-07
+  # PR #109 review 后落地），四个字段：
+  #   atlas_endpoint / listen / provider_id / robot_yaml
   #
   # 提供 atlas 上两条 gRPC cap：
   #   robonix/system/soma/get_yaml   — 读 soma.yaml 的 body description
@@ -105,43 +113,37 @@ system:
   # 给 pilot/scene/nav2 等消费者用。
   #
   # 设计：       docs/Robonix 开发文档.md §五
-  # 两阶段说明： ../docs/soma_two_stage_bringup.md
+  # 两阶段说明： ../docs/soma_two_stage_bringup.md（§12 是 v2 变更）
   # 接入计划：   ../docs/ranger_mini_soma_integration_plan.md
   # 部署 cheatsheet： ./SOMA_DEPLOY.md
   #
-  # ─── soma 在 rbnx 启动链中的位置（按当前 robonix 源码核对） ─────────
-  # soma 是 rbnx 的 SYSTEM_BUILTIN（和 atlas / executor / pilot /
-  # liaison 同列）。rbnx boot 把本段翻译成 CLI flag **直接 fork**
-  # `robonix-soma`（spawn_system_binary → Command::new(bin)），而不是
-  # 走非 builtin system 包的 `rbnx start -p ... + Driver(CMD_INIT,
-  # config_json)` 那条路径。
-  # 翻译规则在 deploy.rs 的 `"soma" =>` 分支：支持的 CLI flag 是
-  #   --listen / --atlas / --provider-id / --default-robot / --config /
-  #   --rbnx-bin / --log / --deployment（数组，每条 path 翻一个 flag）/
-  #   --start-packages（2026-06 新增，对应 config.start_packages，默认 true）
+  # ─── soma 在 rbnx 启动链中的位置 ────────────────────────────────────
+  # soma 是 rbnx 的 SYSTEM_BUILTIN。rbnx boot 用 `spawn_soma_binary`
+  # 特化 fork：建 `pipe(2)`，pre_exec 把读端 dup2 到 fd 3，设
+  # `ROBONIX_SOMA_STAGE_FD=3`；rbnx 父进程保留写端做 stage 2 trigger。
+  # 翻译规则在 deploy.rs 的 `"soma" =>` 分支，支持的 CLI flag：
+  #   --listen / --atlas / --provider-id / --robot-yaml / --config / --log
   #
   # ─── soma 启动后做的事（两阶段 bring-up，v2 模型） ─────────────────
   # stage 1（soma 进程启动初期）：
-  #   1) 解析 `deployments:` 收集所有 primitive + skill 段的包（service
-  #      段被显式 skip，由 rbnx 直接起，见 deployment.rs）。
-  #   2) 对 primitive 段：spawn `rbnx start -p <pkg> --endpoint <atlas>`
+  #   1) 从 --robot-yaml 加载单个 robot 的 soma.yaml + URDF。
+  #   2) 从 robot_yaml 所在目录读同目录的 robonix_manifest.yaml，
+  #      对 primitive 段 spawn `rbnx start -p <pkg> --endpoint <atlas>`
   #      → 等 atlas 注册 → CMD_INIT → CMD_ACTIVATE。
-  #   3) 完成后才向 atlas 注册自身的 get_yaml / get_urdf 两个 gRPC cap
-  #      并 ACTIVE。
-  #   4) 开 `atlas.WatchProvider("soma")` server-stream，挂起等 rbnx
-  #      发 stage 2 trigger。
-  # stage 2（rbnx 起完 service: 段后发 `NotifyProvider("soma",
-  # stage_trigger("stage2"))` 触发）：
+  #   3) 向 atlas 注册自身的 get_yaml / get_urdf 两个 gRPC cap 并 ACTIVE。
+  #   4) 用 `tokio::fs::File::from_std` 把 fd 3 包成 async file，
+  #      `BufReader::read_line` 挂起等 `stage2\n`。
+  # stage 2（rbnx 起完 service: 段后往 pipe 写 `stage2\n` 触发）：
   #   1) 对 skill 段：spawn → CMD_INIT，**不** ACTIVATE。
   #   2) skill 留在 INACTIVE，由 executor 在 MCP 工具被首次调用时
-  #      （ensure_skill_runnable）再发 CMD_ACTIVATE。
+  #      再发 CMD_ACTIVATE。
   #
-  # 也就是说：**rbnx boot 已经不再起 primitive / skill 段**，那两段
-  # 循环 2026-06 已经从 deploy.rs 删除（注释留在原位写
-  # "handled by soma's stage 1/2"）。只要本 manifest 里有 primitive
-  # 或 skill，就**必须**起 soma；否则机器人不会动。rbnx 内部会在
-  # 检测到 primitive/skill 非空但缺 system.soma 时自动注入默认 soma
-  # 块（ensure_soma_defaults），所以这里即使整段写得很简，也能跑。
+  # 也就是说：**rbnx boot 已经不再起 primitive / skill 段**。只要本
+  # manifest 里有 primitive 或 skill，就**必须**起 soma；否则机器人
+  # 不会动。rbnx 内部会在检测到 primitive/skill 非空但缺 system.soma
+  # 时自动注入 empty mapping（ensure_soma_defaults 只保证是个 map，
+  # 不再默认 deployments / start_packages），因此这里必须显式写全
+  # 需要的字段。
   #
   # 部署机上必须已 `make install` 整套源码（不能单独 cargo install
   # robonix-soma），原因见 SOMA_DEPLOY.md §2.1。
@@ -149,13 +151,20 @@ system:
     listen: 127.0.0.1:50091
     log: info
     provider_id: soma
-    default_robot: ranger_mini_01
-    # Keep boot-time Soma config in the manifest so a hand-edited
-    # soma_config.local.yaml cannot make robonix-soma exit before it
-    # subscribes to atlas.WatchProvider("soma").
-    deployments:
-      - /home/syswonder/lhw/ranger_mini_deploy
-    start_packages: true
+    # `robot_yaml` 和 `config` 都由 rbnx 原样透传给 robonix-soma CLI，
+    # 且 rbnx 不 chdir，所以最终**到达 soma 的**必须是绝对路径。
+    # 我们用 rbnx manifest 自带的 `${VAR}` 展开（见 deploy.rs 的
+    # expand_yaml）把 deploy 目录参数化，避免把操作员的 HOME 写死。
+    #
+    # 调用 `rbnx boot` 前请在 shell / .env 里 export：
+    #   export ROBONIX_DEPLOY_DIR="$(pwd)"    # 即本 manifest 所在目录
+    #
+    # 未设置时 rbnx 展开成空串，路径会退化为 `/soma.yaml` 触发
+    # "file not found"，正好把配置错误暴露在 boot 起点而不是后面。
+    robot_yaml: ${ROBONIX_DEPLOY_DIR}/soma.yaml
+    # config 里的字段和上面重复没关系（CLI > config）；保留 --config
+    # 是为了 `robonix-soma --config <this>` 本地手工调试也能跑。
+    config: ${ROBONIX_DEPLOY_DIR}/soma_config.local.yaml
 
   # Non-builtin system services. rbnx boot resolves these by name to
   # `<robonix_source>/system/<key>/`. The robonix tree currently ships

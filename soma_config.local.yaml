@@ -1,42 +1,27 @@
-# robonix-soma process config.
+# robonix-soma v2 process config (flat schema).
 #
-# Loaded by `robonix-soma --config <abs path>`. rbnx boot derives that
-# --config flag from manifest `system.soma.config:` (see deploy.rs
-# `"soma" =>` translation branch). Other flags coming from the manifest
-# (listen / provider_id / default_robot / atlas / log / --start-packages)
-# are passed as additional CLI args and override values in this file.
+# Loaded by `robonix-soma --config <abs path>`. rbnx boot derives the
+# --config flag from manifest system.soma.config:. CLI flags coming
+# from manifest (listen / atlas / provider_id / robot_yaml / log)
+# override values here.
 #
-# Field precedence in SomaConfig::resolve (system/soma/src/config.rs):
+# Field precedence in SomaConfig::resolve:
 #   CLI  >  env  >  config_json  >  this file  >  built-in default
 #
-# Paths MUST be absolute: rbnx spawn_system_binary does not chdir before
-# forking robonix-soma, so the cwd it inherits is wherever `rbnx boot`
-# was invoked — not necessarily this directory.
+# Paths MUST be absolute or relative to this file's directory.
+# rbnx spawn_soma_binary does not chdir before forking robonix-soma;
+# relative paths in this file are resolved against config_dir via
+# SomaConfig::resolve → absolute_path (see robonix/system/soma/src/
+# config.rs), so `./soma.yaml` here works regardless of where rbnx
+# was launched from. Note: this file is loaded by soma directly with
+# plain serde_yaml, it does NOT go through rbnx's ${VAR} expansion —
+# do not use env-var syntax here.
 #
-# References:
-#   - two-stage bring-up: ../docs/soma_two_stage_bringup.md
-#   - integration plan:   ../docs/ranger_mini_soma_integration_plan.md
-#   - PR91 README:        <robonix>/system/soma/README.md
+# See ../robonix/system/soma/README.md for the schema; see
+# ../docs/soma_two_stage_bringup.md section 12 for why v2 dropped
+# deployments / default_robot / start_packages / rbnx_bin.
 
 atlas_endpoint: 127.0.0.1:50051
-listen:        127.0.0.1:50091
-provider_id:   soma
-
-robonix_root: /home/syswonder/lhw/ranger_mini_deploy
-deployments:
-  - /home/syswonder/lhw/ranger_mini_deploy
-
-# Single-robot deploy: empty robot_id in get_yaml/get_urdf resolves to this.
-default_robot: ranger_mini_01
-
-# start_packages: let soma own primitive + skill spawn & lifecycle.
-#   true  (default, what v2 needs) — soma stage1 spawns+INIT+ACTIVATEs
-#         all primitives, then stage2 (rbnx NotifyProvider trigger)
-#         spawns+INITs all skills (ACTIVATE deferred to executor's
-#         first MCP call). rbnx no longer touches those packages.
-#   false (CI / debug only)         — launcher short-circuits to
-#         StartDisabled; primitive + skill never start. Robot stays
-#         dead because rbnx will NOT pick them up either.
-start_packages: true
-
-rbnx_bin: rbnx
+listen:         127.0.0.1:50091
+provider_id:    soma
+robot_yaml:     ./soma.yaml
